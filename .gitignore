@@ -1,0 +1,26 @@
+# === Private agent memory (do not publish) ===
+.qwen/
+
+# === Stale duplicate skeleton (real mod is fabric-example-mod-26.2) ===
+mod/
+
+# === Gradle / build artifacts ===
+.gradle/
+build/
+__pycache__/
+*.pyc
+
+# === Minecraft run instance (game data, logs, configs with binaries) ===
+run/
+logs/
+
+# === Logs ===
+*.log
+
+# === IDE / OS ===
+.idea/
+*.iml
+.vscode/
+*.swp
+Thumbs.db
+.DS_Store

@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "id": "pvpbot",
+  "version": "${version}",
+  "name": "PvP Bot",
+  "description": "Обучаемый NPC-бот для тренировки PvP (imitation learning + эволюция).",
+  "environment": "client",
+  "entrypoints": {
+    "client": [ "dev.pvpbot.PvpBotMod" ]
+  },
+  "depends": {
+    "fabricloader": ">=0.19.5",
+    "minecraft": "~26.2",
+    "java": ">=25",
+    "fabric-api": "*"
+  }
+}
