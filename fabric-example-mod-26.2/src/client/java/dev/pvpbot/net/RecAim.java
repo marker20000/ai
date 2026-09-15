@@ -76,6 +76,11 @@ public final class RecAim {
     private final float oodThreshold; // квадрат расстояния, выше = OOD
     private boolean lastOod = false;   // OOD-флаг последнего aim() (для дебага)
     private float lastDist = 0f;       // расстояние до ближайшего соседа (для дебага)
+    // Последние K соседей (индекс + квадрат расстояния) для диагностики: видно,
+    // согласованны ли соседи по dyaw/dpitch, или K=5 усредняет противоречивые
+    // решения в ≈0. Заполняется в aim() независимо от OOD-ветки.
+    private final int[] lastNbI = new int[K];
+    private final float[] lastNbD = new float[K];
 
     private RecAim(int M, int D, float[][] w, float[][] y, float oodThreshold) {
         this.M = M;
@@ -150,6 +155,23 @@ public final class RecAim {
     public float getLastDist() { return lastDist; }
     public float getOodThreshold() { return oodThreshold; }
 
+    /** Диагностика top-K соседей: индекс, расстояние, yawDiff соседа (° из признака
+     *  7 последнего кадра окна) и учительские dyaw/dpitch. Если соседи противоречат
+     *  друг другу (одни вправо, другие влево), K=5 усредняет решение в ≈0 — бот
+     *  «теряет цель». Читается в BotController каждые 20 тиков при @rec. */
+    public String getNeighborDebug() {
+        final int yawProj = (Config.WINDOW - 1) * FEAT_SEL.length + 1; // позиция yaw_diff(7) в 96-мерной проекции
+        StringBuilder sb = new StringBuilder();
+        for (int k = 0; k < K; k++) {
+            int i = lastNbI[k];
+            if (i < 0) continue;
+            float d = (float) Math.sqrt(lastNbD[k]);
+            sb.append(String.format("#%d d=%.3f yawDiff=%+.1f dyaw=%+.2f dpitch=%+.2f  ",
+                k + 1, d, W[i][yawProj] * 180f, Y[i][0], Y[i][1]));
+        }
+        return sb.toString();
+    }
+
     /** Взвешенное (по AIM_W) квадратичное расстояние между двумя 96-мерными
      *  окнами: доминируют признаки ошибки прицеливания. */
     private static float dist2(float[] a, float[] b) {
@@ -199,6 +221,8 @@ public final class RecAim {
                 }
             }
         }
+        // сохраняем K соседей для диагностики (до OOD-ветки, чтобы были доступны в обоих случаях)
+        for (int k = 0; k < K; k++) { lastNbI[k] = bestI[k]; lastNbD[k] = bestD[k]; }
         // OOD: ближайший сосед слишком далеко — retrieval недостоверен. Вместо
         // {0,0} (это клинит взгляд: состояние не меняется → снова OOD → вечно
         // {0,0}) возвращаем пропорциональную коррекцию по СОБСТВЕННОЙ ошибке

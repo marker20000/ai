@@ -145,6 +145,9 @@ public final class BotController {
             System.out.println(String.format("[pvpbot] цель=%s d=%.1f dyaw=%.3f dpitch=%.3f pitchDiff=%.2f inHit=%d %s atk=%.2f blk=%.2f",
                 opp.getName().getString(), Math.sqrt(self.distanceToSqr(opp)), out[0], out[1], pitchDiff,
                 lastAimInside ? 1 : 0, oodInfo, out[4], out[5]));
+            if (useRecAim && recAim != null) {
+                System.out.println("[pvpbot] KNN top-5: " + recAim.getNeighborDebug());
+            }
         }
     }
 
