@@ -35,6 +35,10 @@ public final class RecAim {
 
     // Только признаки, реально связанные с наводкой (индексы в FEATURE_DIM=30).
     private static final int[] FEAT_SEL = {6, 7, 8, 27, 28, 29}; // dist, yaw_diff, pitch_diff, tar_fwd, tar_side, aim_center
+    // Веса расстояния по aim-признакам: доминируют ошибка прицеливания
+    // (yaw_diff, pitch_diff) и aim_center — сосед выбирается по ПОХОЖЕЙ ОШИБКЕ
+    // ПРИЦЕЛА, а не по случайным признакам состояния. Совпадает с FEAT_W в aim_knn.py.
+    private static final float[] AIM_W = {0.5f, 4.0f, 4.0f, 1.0f, 1.0f, 2.0f}; // dist, yaw_diff, pitch_diff, tar_fwd, tar_side, aim_center
     // Проекция 480-мерного окна (WINDOW*FEATURE_DIM) -> 96-мерный aim-вектор.
     private static final int[] COLS;
     static {
@@ -111,11 +115,7 @@ public final class RecAim {
             float best = Float.MAX_VALUE;
             for (int j = 0; j < n; j++) {
                 if (j == i) continue;
-                float d2 = 0f;
-                for (int k = 0; k < w[i].length; k++) {
-                    float diff = w[i][k] - w[j][k];
-                    d2 += diff * diff;
-                }
+                float d2 = dist2(w[i], w[j]);
                 if (d2 < best) best = d2;
             }
             near.add(best);
@@ -128,6 +128,20 @@ public final class RecAim {
     }
 
     public boolean loaded() { return W != null && M > 0; }
+
+    /** Взвешенное (по AIM_W) квадратичное расстояние между двумя 96-мерными
+     *  окнами: доминируют признаки ошибки прицеливания. */
+    private static float dist2(float[] a, float[] b) {
+        float d2 = 0f;
+        for (int w = 0; w < Config.WINDOW; w++) {
+            int base = w * FEAT_SEL.length;
+            for (int f = 0; f < FEAT_SEL.length; f++) {
+                float diff = a[base + f] - b[base + f];
+                d2 += AIM_W[f] * diff * diff;
+            }
+        }
+        return d2;
+    }
 
     /** Возвращает [dyaw, dpitch] — взвешенное по расстоянию среднее k ближайших.
      *  window — полное 480-мерное окно; проецируется на aim-признаки. */
@@ -142,11 +156,7 @@ public final class RecAim {
             bestI[k] = -1;
         }
         for (int i = 0; i < M; i++) {
-            float d2 = 0f;
-            for (int j = 0; j < D; j++) {
-                float diff = pw[j] - W[i][j];
-                d2 += diff * diff;
-            }
+            float d2 = dist2(pw, W[i]);
             if (d2 < bestD[K - 1]) {
                 bestD[K - 1] = d2;
                 bestI[K - 1] = i;

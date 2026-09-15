@@ -71,9 +71,12 @@ def evaluate(X, Y, window, k, index_n, query_n, seed):
     idx_X, idx_Y = X[idx_sel], Y[idx_sel]
     q_X, q_Y = X[q_sel], Y[q_sel]
 
-    # проекция на aim-признаки (как в игре RecAim) — метрика отражает реальный retrieval
+    # проекция на aim-признаки + взвешенное расстояние (как в игре RecAim):
+    # aim-ошибка (yaw_diff/pitch_diff) и aim_center доминируют, сосед выбирается
+    # по похожей ошибке прицела, а не по случайным признакам.
     cols = _aim_cols(window, FEAT_SEL)
-    pred = knn_predict(idx_X[:, cols], idx_Y, q_X[:, cols], k)
+    wcol = np.tile(np.sqrt(np.array(FEAT_W, dtype=np.float32)), window)
+    pred = knn_predict(idx_X[:, cols] * wcol, idx_Y, q_X[:, cols] * wcol, k)
 
     def report(name, p, t):
         mae = np.abs(p - t).mean()
@@ -104,6 +107,10 @@ def evaluate(X, Y, window, k, index_n, query_n, seed):
 # То же множество использует RecAim.java — иначе ошибка прицела «тонет» среди
 # 480 признаков и KNN залипает. См. анализ Srafd.
 FEAT_SEL = [6, 7, 8, 27, 28, 29]
+# Веса расстояния по aim-признакам: доминируют ошибка прицеливания (yaw_diff,
+# pitch_diff) и aim_center — сосед выбирается по ПОХОЖЕЙ ОШИБКЕ ПРИЦЕЛА, а не по
+# случайным признакам состояния. Должны совпадать с AIM_W в RecAim.java.
+FEAT_W = [0.5, 4.0, 4.0, 1.0, 1.0, 2.0]  # dist, yaw_diff, pitch_diff, tar_fwd, tar_side, aim_center
 
 
 def _aim_cols(window, feat_sel):

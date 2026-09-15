@@ -38,7 +38,24 @@ def per_tick_reward_episode(s, t):
     d_err[1:] = (np.abs(diff_yaw[:-1]) + np.abs(diff_pitch[:-1])
                  - np.abs(diff_yaw[1:]) - np.abs(diff_pitch[1:])) / (2.0 * config.MAX_YAW_RT)
     acq = np.clip(d_err, 0.0, 1.0)
-    return 0.4 * center + 0.3 * track + 0.3 * acq
+    base = 0.4 * center + 0.3 * track + 0.3 * acq
+    # feedback-loop удержание: штрафуем перерегулирование и раскачку, когда
+    # ошибка прицела уже мала. Бот не должен дёргать камеру, будучи на цели.
+    # Награда остаётся в [0,1] (используется как sample_weight — отрицательные
+    # веса ломают взвешенный MSE), поэтому штраф — затухающий множитель.
+    err_sum = np.abs(diff_yaw) + np.abs(diff_pitch)          # суммарная ошибка, град
+    cmd = np.abs(t[:, 0]) + np.abs(t[:, 1])                  # величина команды, град
+    cmd_n = cmd / (2.0 * config.MAX_YAW_RT)                  # ~[0,1]
+    dead = 3.0                                               # deadzone, град
+    within = (err_sum < dead).astype(np.float64)
+    over = np.clip(cmd_n * within, 0.0, 1.0)                 # крупная команда при малой ошибке
+    dy = np.sign(t[:, 0]); dp = np.sign(t[:, 1])
+    flip = ((dy[1:] != dy[:-1]) | (dp[1:] != dp[:-1])) & ((dy[1:] != 0) | (dp[1:] != 0))
+    osc = np.zeros(T, dtype=np.float64)
+    osc[1:] = flip.astype(np.float64) * within[1:]
+    osc = np.clip(osc, 0.0, 1.0)
+    penalty = np.clip(over + osc, 0.0, 0.8)                  # не обнуляем награду полностью
+    return base * (1.0 - penalty)
 
 
 def build_windows_weighted(states, targets, window=None):
