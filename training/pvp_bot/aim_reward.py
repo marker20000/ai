@@ -32,7 +32,13 @@ def per_tick_reward_episode(s, t):
         run = run + 1.0 if on[i] else 0.0
         streak[i] = run
     track = np.minimum(1.0, streak / 10.0)
-    return 0.5 * center + 0.5 * track
+    # захват: награда за БЫСТРОЕ схождение ошибки (уменьшение |err| от тика к тику) —
+    # сеть учит не только УДЕРЖАНИЕ уже хорошего прицела, но и быстрый ЗАХВАТ.
+    d_err = np.zeros(T, dtype=np.float64)
+    d_err[1:] = (np.abs(diff_yaw[:-1]) + np.abs(diff_pitch[:-1])
+                 - np.abs(diff_yaw[1:]) - np.abs(diff_pitch[1:])) / (2.0 * config.MAX_YAW_RT)
+    acq = np.clip(d_err, 0.0, 1.0)
+    return 0.4 * center + 0.3 * track + 0.3 * acq
 
 
 def build_windows_weighted(states, targets, window=None):

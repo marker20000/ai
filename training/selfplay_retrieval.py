@@ -108,7 +108,10 @@ class RetrievalController:
     def act(self, self_a, opp, window):
         dyaw, dpitch = self.aim(window)
         dyaw = float(np.clip(dyaw * self.gain, -config.MAX_YAW_RT, config.MAX_YAW_RT))
-        dpitch = float(np.clip(dpitch * self.gain, -config.MAX_YAW_RT, config.MAX_YAW_RT))
+        # gain только по yaw — как в игровом BotController (по pitch убран: в in-game
+        # retrieval он вёл к уходу тангажа в насыщение). Чтобы self-play был ЧЕСТНОЙ
+        # оценкой игры, повторяем ту же логику управления.
+        dpitch = float(np.clip(dpitch, -config.MAX_YAW_RT, config.MAX_YAW_RT))
         # --- движение: чисто сим-скаффолд, чтобы бой был осмысленным. ---
         # rec-данные содержат ТОЛЬКО ротацию (ходьба/удар не записаны), поэтому
         # держать дистанцию решает простая геометрия, а КУДА смотреть — retrieval.
