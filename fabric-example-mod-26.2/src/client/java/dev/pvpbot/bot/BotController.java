@@ -105,6 +105,15 @@ public final class BotController {
         float[] s = StateVector.collect(self, opp, prevOpp, prevYaw, prevPitch, false);
         float pitchDiff = StateVector.pitchDiffTo(self, opp);
 
+        // запоминаем состояние ДО применения действия — для признаков скорости на
+        // след. тике. Обновляем сразу после collect (до раннего return при
+        // заполнении окна): иначе во время warm-up prev остаётся заморожен на
+        // значениях момента включения, и tar_fwd/tar_side/yawRate/pitchRate
+        // считаются неверно первые 15 тиков.
+        prevYaw = yawAtF;
+        prevPitch = pitchAtF;
+        prevOpp = oppAtF;
+
         // сдвиговое окно: сдвигаем влево на FEATURE_DIM, кладём новый тик в конец
         if (count < Config.INPUT_DIM) {
             System.arraycopy(s, 0, window, count, Config.FEATURE_DIM);
@@ -129,10 +138,6 @@ public final class BotController {
             return;
         }
         apply(self, client, opp, out, window, pitchDiff);
-        // запоминаем состояние до применения действия — для признаков скорости на след. тике
-        prevYaw = yawAtF;
-        prevPitch = pitchAtF;
-        prevOpp = oppAtF;
         if (dbg++ % 20 == 0) {
             String oodInfo = (useRecAim && recAim != null)
                 ? String.format("ood=%d knnD=%.3f", recAim.isOod() ? 1 : 0, recAim.getLastDist())
