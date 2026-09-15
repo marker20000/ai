@@ -42,6 +42,7 @@ public final class BotController {
     private float tgtYaw = 0f;
     private float tgtPitch = 0f;
     private boolean aimTarget = false;
+    private boolean lastAimInside = false; // флаг «луч в хитбоксе» для дебага
     private static final float AIM_PER_TICK = 0.8f; // доля оставшегося пути за тик (независимо от FPS)
     private static final float AIM_GAIN = 2.5f;      // усиление выхода прицеливания (доводит до центра)
 
@@ -132,8 +133,12 @@ public final class BotController {
         prevPitch = pitchAtF;
         prevOpp = oppAtF;
         if (dbg++ % 20 == 0) {
-            System.out.println(String.format("[pvpbot] цель=%s d=%.1f out1(dpitch)=%.3f pitchDiff=%.2f fwd=%.2f str=%.2f atk=%.2f blk=%.2f",
-                opp.getName().getString(), Math.sqrt(self.distanceToSqr(opp)), out[1], pitchDiff, lastFwd, lastStrafe, out[4], out[5]));
+            String oodInfo = (useRecAim && recAim != null)
+                ? String.format("ood=%d knnD=%.3f", recAim.isOod() ? 1 : 0, recAim.getLastDist())
+                : "ood=n/a";
+            System.out.println(String.format("[pvpbot] цель=%s d=%.1f dyaw=%.3f dpitch=%.3f pitchDiff=%.2f inHit=%d %s atk=%.2f blk=%.2f",
+                opp.getName().getString(), Math.sqrt(self.distanceToSqr(opp)), out[0], out[1], pitchDiff,
+                lastAimInside ? 1 : 0, oodInfo, out[4], out[5]));
         }
     }
 
@@ -148,6 +153,22 @@ public final class BotController {
             out[0] = Mth.clamp(ra[0], -Config.MAX_YAW_RT, Config.MAX_YAW_RT);
             out[1] = Mth.clamp(ra[1], -Config.MAX_YAW_RT, Config.MAX_YAW_RT);
         }
+
+        // deadzone «луч внутри хитбокса»: если уже целимся в цель, гасим коррекцию,
+        // чтобы не раскачиваться на цели (хаос знаков у цели из логов). Вне хитбокса
+        // коррекция идёт полностью — удержать цель важнее идеального центра.
+        Vec3 eye = self.getEyePosition();
+        Vec3 center = new Vec3(opp.getX(), opp.getY() + opp.getBbHeight() * 0.5, opp.getZ());
+        Vec3 look = self.getLookAngle().normalize();
+        Vec3 toOpp = center.subtract(eye).normalize();
+        float aimCos = (float) look.dot(toOpp);
+        lastAimInside = aimCos > Config.AIM_COS;
+        if (lastAimInside) {
+            float damp = 0.15f;
+            out[0] *= damp;
+            out[1] *= damp;
+        }
+
         // усиление выхода прицеливания: модель имитирует маленькие поправки учителя
         // (П-регулятор с остаточной ошибкой ~25-35°). Gain доворачивает до центра;
         // направление всё равно даёт сеть/retrieval — это не скриптовая геометрия.
@@ -170,8 +191,6 @@ public final class BotController {
         aimTarget = true;
 
         double dist = Math.sqrt(self.distanceToSqr(opp));
-        Vec3 center = new Vec3(opp.getX(), opp.getY() + opp.getBbHeight() * 0.5, opp.getZ());
-        Vec3 eye = self.getEyePosition();
 
         // Движение отключено: бот только целится и бьёт, ходить — вручную.
         // out[2]/out[3] из модели намеренно игнорируем (коррекцию движения убрали).
@@ -182,9 +201,7 @@ public final class BotController {
         //     прицел держит сама сеть, поэтому диких взмахов в сторону нет. ---
         if (out[Config.ATTACK_CH] > 0.5f && self.getAttackStrengthScale(0.0f) >= 1.0f
                 && dist <= Config.REACH && opp != null) {
-            Vec3 look = self.getLookAngle().normalize();
-            Vec3 toOpp = center.subtract(eye).normalize();
-            if (look.dot(toOpp) > Config.AIM_COS) {
+            if (aimCos > Config.AIM_COS) {
                 // лёгкий разброс, чтобы не бить всё время в одну точку
                 self.setYRot(self.getYRot() + (jitter.nextFloat() - 0.5f) * 2.0f);
                 self.setXRot(self.getXRot() + (jitter.nextFloat() - 0.5f) * 2.0f);

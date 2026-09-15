@@ -10,6 +10,7 @@ import java.util.Arrays;
 import java.util.List;
 
 import dev.pvpbot.config.Config;
+import net.minecraft.util.Mth;
 
 /**
  * Retrieval-аим: вместо MLP ищем в датасете ближайшее окно состояния и берём
@@ -23,8 +24,10 @@ import dev.pvpbot.config.Config;
  * один и тот же сосед даже при большой ошибке (залипание dpitch). См. анализ Srafd.
  *
  * OOD-фоллбэк: если ближайший сосед слишком далеко (состояние вне распределения
- * датасета), retrieval не заслуживает доверия — возвращаем {0,0} (абстенция),
- * чтобы не «залипать» на неверной команде.
+ * датасета), retrieval не заслуживает доверия. Вместо {0,0} (что клинит взгляд:
+ * состояние не меняется → снова OOD → вечно {0,0}) возвращаем пропорциональную
+ * коррекцию по СОБСТВЕННОЙ ошибке прицеливания из окна — recovery-контроллер,
+ * направление даёт само состояние, не скриптовая геометрия.
  *
  * Формат rec_index.bin (little-endian):
  *   "PVRI" (4 байта), int32 M, int32 D (=WINDOW*FEAT_SEL.length),
@@ -58,6 +61,8 @@ public final class RecAim {
     private final float[][] W; // [M][D] окна состояния (уже спроецированные)
     private final float[][] Y; // [M][2] dyaw, dpitch учителя
     private final float oodThreshold; // квадрат расстояния, выше = OOD
+    private boolean lastOod = false;   // OOD-флаг последнего aim() (для дебага)
+    private float lastDist = 0f;       // расстояние до ближайшего соседа (для дебага)
 
     private RecAim(int M, int D, float[][] w, float[][] y, float oodThreshold) {
         this.M = M;
@@ -128,6 +133,9 @@ public final class RecAim {
     }
 
     public boolean loaded() { return W != null && M > 0; }
+    public boolean isOod() { return lastOod; }
+    public float getLastDist() { return lastDist; }
+    public float getOodThreshold() { return oodThreshold; }
 
     /** Взвешенное (по AIM_W) квадратичное расстояние между двумя 96-мерными
      *  окнами: доминируют признаки ошибки прицеливания. */
@@ -169,9 +177,22 @@ public final class RecAim {
                 }
             }
         }
-        // OOD: ближайший сосед слишком далеко — не доверяем retrieval.
+        // OOD: ближайший сосед слишком далеко — retrieval недостоверен. Вместо
+        // {0,0} (это клинит взгляд: состояние не меняется → снова OOD → вечно
+        // {0,0}) возвращаем пропорциональную коррекцию по СОБСТВЕННОЙ ошибке
+        // прицеливания из окна (признаки 7/8 = yawDiff/pitchDiff). Это
+        // recovery-контроллер: направление даёт само состояние, не скрипт.
         if (bestD[0] > oodThreshold) {
-            return new float[]{0f, 0f};
+            lastOod = true;
+            lastDist = (float) Math.sqrt(bestD[0]);
+            int last = (Config.WINDOW - 1) * Config.FEATURE_DIM;
+            float yawDiffDeg = window[last + 7] * 180f;   // f[7] = yawDiff/180
+            float pitchDiffDeg = window[last + 8] * 90f;  // f[8] = pitchDiff/90
+            float k = 0.25f;
+            return new float[]{
+                Mth.clamp(yawDiffDeg * k, -Config.MAX_YAW_RT, Config.MAX_YAW_RT),
+                Mth.clamp(pitchDiffDeg * k, -Config.MAX_YAW_RT, Config.MAX_YAW_RT)
+            };
         }
         float dyaw = 0f, dpitch = 0f, wsum = 0f;
         for (int k = 0; k < K; k++) {
@@ -185,6 +206,8 @@ public final class RecAim {
             dyaw /= wsum;
             dpitch /= wsum;
         }
+        lastOod = false;
+        lastDist = (float) Math.sqrt(bestD[0]);
         return new float[]{dyaw, dpitch};
     }
 }
