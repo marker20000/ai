@@ -71,7 +71,9 @@ def evaluate(X, Y, window, k, index_n, query_n, seed):
     idx_X, idx_Y = X[idx_sel], Y[idx_sel]
     q_X, q_Y = X[q_sel], Y[q_sel]
 
-    pred = knn_predict(idx_X, idx_Y, q_X, k)
+    # проекция на aim-признаки (как в игре RecAim) — метрика отражает реальный retrieval
+    cols = _aim_cols(window, FEAT_SEL)
+    pred = knn_predict(idx_X[:, cols], idx_Y, q_X[:, cols], k)
 
     def report(name, p, t):
         mae = np.abs(p - t).mean()
@@ -97,6 +99,22 @@ def evaluate(X, Y, window, k, index_n, query_n, seed):
     print(f"  baseline(const) cosine: mean={cosb.mean():.3f}")
 
 
+# Только признаки, реально связанные с наводкой (индексы в FEATURE_DIM=30):
+# dist=6, yaw_diff=7, pitch_diff=8, tar_fwd=27, tar_side=28, aim_center=29.
+# То же множество использует RecAim.java — иначе ошибка прицела «тонет» среди
+# 480 признаков и KNN залипает. См. анализ Srafd.
+FEAT_SEL = [6, 7, 8, 27, 28, 29]
+
+
+def _aim_cols(window, feat_sel):
+    cols = []
+    for w in range(window):
+        base = w * config.FEATURE_DIM
+        for i in feat_sel:
+            cols.append(base + i)
+    return cols
+
+
 def export_index(states, targets, window, out_path, n, seed):
     """Строит индекс для мода: случайная подвыборка окон (M,D) + aim-дельты (M,2),
     пишет кастомный бинарь (little-endian), читаемый RecAim.java."""
@@ -104,7 +122,8 @@ def export_index(states, targets, window, out_path, n, seed):
     X, Y = build_windows(states, targets, window)
     n = min(n, X.shape[0])
     sel = rng.permutation(X.shape[0])[:n]
-    W = X[sel].astype(np.float32)
+    cols = _aim_cols(window, FEAT_SEL)
+    W = X[sel][:, cols].astype(np.float32)   # (n, 96)
     Yaim = Y[sel].astype(np.float32)
     with open(out_path, "wb") as f:
         f.write(b"PVRI")
@@ -112,6 +131,23 @@ def export_index(states, targets, window, out_path, n, seed):
         f.write(W.tobytes())
         f.write(Yaim.tobytes())
     print(f"[export] {out_path}: M={W.shape[0]} D={W.shape[1]}  (okna={X.shape[0]})")
+
+
+def dump_target_stats(Y):
+    """Распределение aim-целей (dyaw, dpitch) по ВСЕМУ датасету. Диагностика
+    вырожденности targets (Srafd): std≈0 / unique≈1 означали бы, что KNN не с
+    чего учить. Внимание: старый evaluate() при query=1 выдавал std_учит.=0.000
+    лишь потому, что оценивал ОДИН сэмпл — это артефакт, не признак константных
+    данных."""
+    for name, col in [("dyaw", Y[:, 0]), ("dpitch", Y[:, 1])]:
+        print(f"[stats:{name}] min={col.min():.4f} max={col.max():.4f} "
+              f"mean={col.mean():.4f} std={col.std():.4f} unique={len(np.unique(col))}")
+    qs = (0, 0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99, 1.0)
+    print("[stats] quantiles dyaw  :", [round(float(np.quantile(Y[:, 0], q)), 4) for q in qs])
+    print("[stats] quantiles dpitch:", [round(float(np.quantile(Y[:, 1], q)), 4) for q in qs])
+    print("[stats] first 30 targets (dyaw, dpitch):")
+    for row in Y[:30]:
+        print(f"    {row[0]:+.4f} {row[1]:+.4f}")
 
 
 def main():
@@ -131,6 +167,7 @@ def main():
     states, targets = dataset.load_npz(args.data)
     X, Y = build_windows(states, targets, args.window)
     print(f"[aim_knn] окон всего: {X.shape}, целей(aim): {Y.shape}")
+    dump_target_stats(Y)
     if X.shape[0] == 0:
         print("пусто — проверь путь к датасету"); return
     if args.export:

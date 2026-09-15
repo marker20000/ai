@@ -5,32 +5,62 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+
+import dev.pvpbot.config.Config;
 
 /**
- * Retrieval-аим: вместо MLP ищем в датасете друга ближайшее окно состояния
- * (относительно себя) и берём записанные дельты прицеливания (dyaw, dpitch).
+ * Retrieval-аим: вместо MLP ищем в датасете ближайшее окно состояния и берём
+ * записанные дельты прицеливания (dyaw, dpitch).
  *
- * Это imitation через retrieval, а не скриптовая геометрия: бот «повторяет»,
- * как целился человек, опираясь на реальные записи. Решение (куда смотреть)
- * по-прежнему дано данными, сеть тут не при чём — это и есть то, что просил
- * пользователь («на условии датасета искал ближайшую траекторию»).
+ * Решение (куда смотреть) по-прежнему даётся ДАННЫМИ — это imitation через
+ * retrieval, а не скриптовая геометрия (как и требовал пользователь). Просто
+ * расстояние теперь считается НЕ по всему 480-мерному окну, а только по
+ * aim-признакам (dist, yaw_diff, pitch_diff, tar_fwd, tar_side, aim_center):
+ * иначе ошибка прицела «тонет» среди 480 признаков и KNN стабильно выбирает
+ * один и тот же сосед даже при большой ошибке (залипание dpitch). См. анализ Srafd.
  *
- * Формат rec_index.bin (little-endian, как в Weights.fromBinary):
- *   "PVRI" (4 байта), int32 M, int32 D, float32 W[M*D], float32 Y[M*2].
+ * OOD-фоллбэк: если ближайший сосед слишком далеко (состояние вне распределения
+ * датасета), retrieval не заслуживает доверия — возвращаем {0,0} (абстенция),
+ * чтобы не «залипать» на неверной команде.
+ *
+ * Формат rec_index.bin (little-endian):
+ *   "PVRI" (4 байта), int32 M, int32 D (=WINDOW*FEAT_SEL.length),
+ *   float32 W[M*D], float32 Y[M*2].
  */
 public final class RecAim {
     private static final int K = 5; // число соседей
 
+    // Только признаки, реально связанные с наводкой (индексы в FEATURE_DIM=30).
+    private static final int[] FEAT_SEL = {6, 7, 8, 27, 28, 29}; // dist, yaw_diff, pitch_diff, tar_fwd, tar_side, aim_center
+    // Проекция 480-мерного окна (WINDOW*FEATURE_DIM) -> 96-мерный aim-вектор.
+    private static final int[] COLS;
+    static {
+        COLS = new int[Config.WINDOW * FEAT_SEL.length];
+        int p = 0;
+        for (int w = 0; w < Config.WINDOW; w++)
+            for (int f : FEAT_SEL)
+                COLS[p++] = w * Config.FEATURE_DIM + f;
+    }
+
+    // Во сколько раз типичная ближайшая дистанция должна быть превышена, чтобы
+    // состояние считалось вне распределения (OOD). Подбирается опытным путём.
+    private static final float OOD_FACTOR = 5.0f;
+
     private final int M;
     private final int D;
-    private final float[][] W; // [M][D] окна состояния
+    private final float[][] W; // [M][D] окна состояния (уже спроецированные)
     private final float[][] Y; // [M][2] dyaw, dpitch учителя
+    private final float oodThreshold; // квадрат расстояния, выше = OOD
 
-    private RecAim(int M, int D, float[][] w, float[][] y) {
+    private RecAim(int M, int D, float[][] w, float[][] y, float oodThreshold) {
         this.M = M;
         this.D = D;
         this.W = w;
         this.Y = y;
+        this.oodThreshold = oodThreshold;
     }
 
     public static RecAim load(Path dir) {
@@ -48,6 +78,9 @@ public final class RecAim {
                 throw new IOException("битый magic rec_index.bin");
             int m = buf.getInt();
             int d = buf.getInt();
+            if (d != COLS.length)
+                throw new IOException("rec_index.bin имеет D=" + d + ", ожидалось " + COLS.length +
+                        " (пересоберите через aim_knn.py --export)");
             float[][] w = new float[m][d];
             for (int i = 0; i < m; i++)
                 for (int j = 0; j < d; j++) w[i][j] = buf.getFloat();
@@ -56,19 +89,52 @@ public final class RecAim {
                 y[i][0] = buf.getFloat();
                 y[i][1] = buf.getFloat();
             }
-            System.out.println("[pvpbot] rec_index.bin загружен: M=" + m + " D=" + d);
-            return new RecAim(m, d, w, y);
+            float ood = computeOodThreshold(w);
+            System.out.println("[pvpbot] rec_index.bin загружен: M=" + m + " D=" + d + " oodThreshold=" + ood);
+            return new RecAim(m, d, w, y, ood);
         } catch (IOException e) {
             System.out.println("[pvpbot] rec_index.bin не загружен: " + e);
             return null;
         }
     }
 
+    /** Адаптивная оценка порога OOD: берём выборку строк индекса, для каждой —
+     * минимальную квадрат-дистанцию до ДРУГОЙ строки (типичная близость внутри
+     * распределения), 90-й перцентиль умножаем на фактор. Дешёвая и масштабируемая. */
+    private static float computeOodThreshold(float[][] w) {
+        int n = w.length;
+        if (n < 2) return Float.MAX_VALUE;
+        int sample = Math.min(n, 512);
+        List<Float> near = new ArrayList<>(sample);
+        for (int s = 0; s < sample; s++) {
+            int i = (s * n) / sample; // равномерная выборка
+            float best = Float.MAX_VALUE;
+            for (int j = 0; j < n; j++) {
+                if (j == i) continue;
+                float d2 = 0f;
+                for (int k = 0; k < w[i].length; k++) {
+                    float diff = w[i][k] - w[j][k];
+                    d2 += diff * diff;
+                }
+                if (d2 < best) best = d2;
+            }
+            near.add(best);
+        }
+        float[] arr = new float[near.size()];
+        for (int i = 0; i < arr.length; i++) arr[i] = near.get(i);
+        Arrays.sort(arr);
+        float base = arr[(int) (0.90 * (arr.length - 1))];
+        return base * OOD_FACTOR;
+    }
+
     public boolean loaded() { return W != null && M > 0; }
 
-    /** Возвращает [dyaw, dpitch] — взвешенное по расстоянию среднее k ближайших. */
+    /** Возвращает [dyaw, dpitch] — взвешенное по расстоянию среднее k ближайших.
+     *  window — полное 480-мерное окно; проецируется на aim-признаки. */
     public float[] aim(float[] window) {
-        // bestD отсортирован по возрастанию (индекс 0 = ближайший), bestD[K-1] = худший.
+        float[] pw = new float[D];
+        for (int k = 0; k < D; k++) pw[k] = window[COLS[k]];
+
         float[] bestD = new float[K];
         int[] bestI = new int[K];
         for (int k = 0; k < K; k++) {
@@ -78,7 +144,7 @@ public final class RecAim {
         for (int i = 0; i < M; i++) {
             float d2 = 0f;
             for (int j = 0; j < D; j++) {
-                float diff = window[j] - W[i][j];
+                float diff = pw[j] - W[i][j];
                 d2 += diff * diff;
             }
             if (d2 < bestD[K - 1]) {
@@ -93,13 +159,17 @@ public final class RecAim {
                 }
             }
         }
+        // OOD: ближайший сосед слишком далеко — не доверяем retrieval.
+        if (bestD[0] > oodThreshold) {
+            return new float[]{0f, 0f};
+        }
         float dyaw = 0f, dpitch = 0f, wsum = 0f;
         for (int k = 0; k < K; k++) {
             if (bestI[k] < 0) continue;
-            float w = (float) (1.0 / (Math.sqrt(bestD[k]) + 1e-3));
-            dyaw += w * Y[bestI[k]][0];
-            dpitch += w * Y[bestI[k]][1];
-            wsum += w;
+            float wgt = (float) (1.0 / (Math.sqrt(bestD[k]) + 1e-3));
+            dyaw += wgt * Y[bestI[k]][0];
+            dpitch += wgt * Y[bestI[k]][1];
+            wsum += wgt;
         }
         if (wsum > 0f) {
             dyaw /= wsum;
