@@ -59,9 +59,10 @@ def main():
         print(f"  |yawDiff|>{thr:3d}°: {np.mean(np.abs(yawDiff) > thr):6.2%}   "
               f"|pitchDiff|>{thr:3d}°: {np.mean(np.abs(pitchDiff) > thr):6.2%}")
 
-    # внутри хитбокса (aim_center f[29] > 0)
-    inside = S[:, 29] > 0
-    print(f"[diag] доля тиков «в хитбоксе» (f29>0): {inside.mean():6.2%}")
+    # aim_center (f[29]): угловая близость к центру цели (cosine), НЕ попадание в
+    # AABB. Настоящий ray-vs-AABB считается только в BotController во время игры.
+    centered = S[:, 29] > 0
+    print(f"[diag] доля тиков с aim_center>0 (угловая близость к центру): {centered.mean():6.2%}")
 
     # таблица yawDiff -> средний dyaw
     print("[diag] yawDiff диапазон -> mean dyaw (count):")
