@@ -52,6 +52,19 @@ public final class RecAim {
                 COLS[p++] = w * Config.FEATURE_DIM + f;
     }
 
+    // Временное затухание по кадрам окна: недавние кадры важнее старых, чтобы
+    // retrieval быстрее реагировал на резкие изменения (прыжок/flick/смена
+    // направления), не теряя пользу истории для плавного tracking. Старый кадр —
+    // малый вес, новый — 1.0. Сами признаки не меняются, rec_index.bin
+    // пересобирать не надо (веса только в метрике расстояния).
+    private static final float[] TEMP_W;
+    static {
+        final int W = Config.WINDOW;
+        TEMP_W = new float[W];
+        for (int w = 0; w < W; w++)
+            TEMP_W[w] = 0.15f + 0.85f * (w / (float) (W - 1));
+    }
+
     // Во сколько раз типичная ближайшая дистанция должна быть превышена, чтобы
     // состояние считалось вне распределения (OOD). Подбирается опытным путём.
     private static final float OOD_FACTOR = 5.0f;
@@ -154,7 +167,7 @@ public final class RecAim {
                 } else {
                     diff = a[base + f] - b[base + f];
                 }
-                d2 += AIM_W[f] * diff * diff;
+                d2 += AIM_W[f] * TEMP_W[w] * diff * diff;
             }
         }
         return d2;

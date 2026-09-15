@@ -34,30 +34,39 @@ def build_windows(states, targets, window):
     return np.vstack(Xs), np.vstack(Ys)
 
 
-def knn_predict(idx_X, idx_Y, q_X, k, circ_cols=None, fw_yaw=0.0):
+def knn_predict(idx_X, idx_Y, q_X, k, circ_cols=None, ww_arr=None):
     """Поиск k ближайших соседей чанками (без sklearn). Возвращает среднее по k
     соседям дельт (dyaw,dpitch) для каждого запроса. circ_cols — индексы
-    столбцов проецированного вектора, соответствующих циклическому yaw_diff
-    (считаем расстояние по окружности, как в RecAim.dist2); fw_yaw — их вес AIM_W."""
-    idx_X = idx_X.astype(np.float32)
+    столбцов циклического yaw_diff в проекции; ww_arr — квадраты весов
+    расстояния на каждый столбец проекции (FEAT_W[f]*TEMP_W[w]), зеркалят
+    метрику RecAim.dist2: d2 = Σ_w Σ_f FEAT_W[f]*TEMP_W[w]*diff², плюс
+    циклическая поправка для yaw_diff (свёртка разности по окружности к
+    (-180,180]°), как в игре."""
+    if ww_arr is not None:
+        sw = np.sqrt(ww_arr.astype(np.float32))
+        idx_X = idx_X.astype(np.float32) * sw
+        q_X = q_X.astype(np.float32) * sw
+    else:
+        idx_X = idx_X.astype(np.float32)
+        q_X = q_X.astype(np.float32)
     idx_sq = (idx_X * idx_X).sum(axis=1)  # (M,)
     nq = q_X.shape[0]
     out = np.zeros((nq, 2), dtype=np.float64)
-    q = q_X.astype(np.float32)
     CH = 256  # запросов в чанке, чтобы не раздуть матрицу расстояний
     for start in range(0, nq, CH):
-        chunk = q[start:start + CH]                       # (b, D)
+        chunk = q_X[start:start + CH]                     # (b, D)
         csq = (chunk * chunk).sum(axis=1)[:, None]        # (b, 1)
         d2 = csq + idx_sq[None, :] - 2.0 * (chunk @ idx_X.T)  # (b, M)
-        # циклическая поправка для yaw_diff: входы уже взвешены sqrt(AIM_W), поэтому
-        # евклидов вклад равен AIM_W*(eucl^2); заменяем его на AIM_W*(circ^2), где
-        # circ — разность, свёрнутая по окружности к (-180,180]° (как в игре).
-        if circ_cols is not None and fw_yaw > 0.0:
+        # циклическая поправка для yaw_diff: входы уже взвешены sqrt(FEAT_W*TEMP_W),
+        # поэтому евклидов вклад равен FEAT_W*TEMP_W*(eucl²); заменяем его на
+        # FEAT_W*TEMP_W*(circ²), где circ — разность, свёрнутая по окружности к
+        # (-180,180]° (как в RecAim.dist2, но веса уже внутри eucl/circ).
+        if circ_cols is not None:
             corr = np.zeros((chunk.shape[0], idx_X.shape[0]), dtype=np.float64)
             for c in circ_cols:
                 eucl = chunk[:, c, None] - idx_X[None, :, c]                       # (b, M)
                 circ = ((eucl * 180.0 + 180.0) % 360.0 - 180.0) / 180.0           # к (-1,1]
-                corr += fw_yaw * (circ * circ - eucl * eucl)
+                corr += circ * circ - eucl * eucl
             d2 = d2 + corr
         np.maximum(d2, 0.0, out=d2)
         kk = min(k, d2.shape[1])
@@ -85,15 +94,19 @@ def evaluate(X, Y, window, k, index_n, query_n, seed):
 
     # проекция на aim-признаки + взвешенное расстояние (как в игре RecAim):
     # aim-ошибка (yaw_diff/pitch_diff) и aim_center доминируют, сосед выбирается
-    # по похожей ошибке прицела, а не по случайным признакам.
+    # по похожей ошибке прицела, а не по случайным признакам. Веса расстояния на
+    # каждый столбец проекции = FEAT_W[f]*TEMP_W[w], повторяют RecAim.dist2
+    # (недавние кадры окна весят больше — быстрая реакция на прыжок/flick).
     cols = _aim_cols(window, FEAT_SEL)
-    wcol = np.tile(np.sqrt(np.array(FEAT_W, dtype=np.float32)), window)
-    # циклический yaw_diff (признак 7) во всех 16 окнах — те же столбцы проекции,
-    # что и в RecAim.dist2; передаём, чтобы offline-метрика совпадала с игрой.
     yaw_pos = FEAT_SEL.index(7)
     circ_cols = [w * len(FEAT_SEL) + yaw_pos for w in range(window)]
-    pred = knn_predict(idx_X[:, cols] * wcol, idx_Y, q_X[:, cols] * wcol, k,
-                       circ_cols=circ_cols, fw_yaw=FEAT_W[yaw_pos])
+    temp_w = np.array([0.15 + 0.85 * (w / (window - 1)) for w in range(window)],
+                     dtype=np.float32)
+    fw = np.tile(np.array(FEAT_W, dtype=np.float32), window)        # FEAT_W[f]
+    tw = np.repeat(temp_w, len(FEAT_SEL))                          # TEMP_W[w]
+    ww = fw * tw                                                   # FEAT_W[f]*TEMP_W[w]
+    pred = knn_predict(idx_X[:, cols], idx_Y, q_X[:, cols], k,
+                       circ_cols=circ_cols, ww_arr=ww)
 
     def report(name, p, t):
         mae = np.abs(p - t).mean()
