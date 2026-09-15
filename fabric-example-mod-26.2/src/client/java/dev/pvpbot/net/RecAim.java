@@ -144,7 +144,16 @@ public final class RecAim {
         for (int w = 0; w < Config.WINDOW; w++) {
             int base = w * FEAT_SEL.length;
             for (int f = 0; f < FEAT_SEL.length; f++) {
-                float diff = a[base + f] - b[base + f];
+                float diff;
+                if (FEAT_SEL[f] == 7) {
+                    // yaw_diff (f[7]=yawDiff/180) — циклический признак: +179° и -179°
+                    // физически в 2° друг от друга, но евклидова разница ~358°. Сворачиваем
+                    // по окружности, иначе KNN на границе ±180° рвёт соседей (критично для
+                    // recovery на 180°). pitch_diff (f[8]) циклическим НЕ является.
+                    diff = Mth.wrapDegrees((a[base + f] - b[base + f]) * 180.0f) / 180.0f;
+                } else {
+                    diff = a[base + f] - b[base + f];
+                }
                 d2 += AIM_W[f] * diff * diff;
             }
         }

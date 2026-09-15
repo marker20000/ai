@@ -34,9 +34,11 @@ def build_windows(states, targets, window):
     return np.vstack(Xs), np.vstack(Ys)
 
 
-def knn_predict(idx_X, idx_Y, q_X, k):
+def knn_predict(idx_X, idx_Y, q_X, k, circ_cols=None, fw_yaw=0.0):
     """Поиск k ближайших соседей чанками (без sklearn). Возвращает среднее по k
-    соседям дельт (dyaw,dpitch) для каждого запроса."""
+    соседям дельт (dyaw,dpitch) для каждого запроса. circ_cols — индексы
+    столбцов проецированного вектора, соответствующих циклическому yaw_diff
+    (считаем расстояние по окружности, как в RecAim.dist2); fw_yaw — их вес AIM_W."""
     idx_X = idx_X.astype(np.float32)
     idx_sq = (idx_X * idx_X).sum(axis=1)  # (M,)
     nq = q_X.shape[0]
@@ -47,6 +49,16 @@ def knn_predict(idx_X, idx_Y, q_X, k):
         chunk = q[start:start + CH]                       # (b, D)
         csq = (chunk * chunk).sum(axis=1)[:, None]        # (b, 1)
         d2 = csq + idx_sq[None, :] - 2.0 * (chunk @ idx_X.T)  # (b, M)
+        # циклическая поправка для yaw_diff: входы уже взвешены sqrt(AIM_W), поэтому
+        # евклидов вклад равен AIM_W*(eucl^2); заменяем его на AIM_W*(circ^2), где
+        # circ — разность, свёрнутая по окружности к (-180,180]° (как в игре).
+        if circ_cols is not None and fw_yaw > 0.0:
+            corr = np.zeros((chunk.shape[0], idx_X.shape[0]), dtype=np.float64)
+            for c in circ_cols:
+                eucl = chunk[:, c, None] - idx_X[None, :, c]                       # (b, M)
+                circ = ((eucl * 180.0 + 180.0) % 360.0 - 180.0) / 180.0           # к (-1,1]
+                corr += fw_yaw * (circ * circ - eucl * eucl)
+            d2 = d2 + corr
         np.maximum(d2, 0.0, out=d2)
         kk = min(k, d2.shape[1])
         part = np.argpartition(d2, kk - 1, axis=1)[:, :kk]     # (b, kk)
@@ -76,7 +88,12 @@ def evaluate(X, Y, window, k, index_n, query_n, seed):
     # по похожей ошибке прицела, а не по случайным признакам.
     cols = _aim_cols(window, FEAT_SEL)
     wcol = np.tile(np.sqrt(np.array(FEAT_W, dtype=np.float32)), window)
-    pred = knn_predict(idx_X[:, cols] * wcol, idx_Y, q_X[:, cols] * wcol, k)
+    # циклический yaw_diff (признак 7) во всех 16 окнах — те же столбцы проекции,
+    # что и в RecAim.dist2; передаём, чтобы offline-метрика совпадала с игрой.
+    yaw_pos = FEAT_SEL.index(7)
+    circ_cols = [w * len(FEAT_SEL) + yaw_pos for w in range(window)]
+    pred = knn_predict(idx_X[:, cols] * wcol, idx_Y, q_X[:, cols] * wcol, k,
+                       circ_cols=circ_cols, fw_yaw=FEAT_W[yaw_pos])
 
     def report(name, p, t):
         mae = np.abs(p - t).mean()
