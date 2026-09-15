@@ -83,6 +83,33 @@ def main():
         else:
             print(f"  [{lo:>4},{hi:>4}) : mean_dpitch={dpitch[m].mean():+7.3f}  (n={m.sum()})")
 
+    # analysis #9: где teacher-действие вырождается в dyaw≈0 при большой ошибке.
+    # Абсолютные корзины ошибки; для каждой — число, средний ЗНАК (направление
+    # совпадает с ошибкой?), mean|dyaw| (величина поворота) и доля нулевых
+    # действий (|dyaw|<0.5°, как в aim_knn eval). Если на больших ошибках
+    # zero% велика и mean|dyaw| мала — данные содержат «пустые» recovery-примеры.
+    ZERO_EPS = 0.5
+    print(f"[diag] |yawDiff| корзина -> n, mean dyaw(знак), mean|dyaw|, zero%(|dyaw|<{ZERO_EPS}):")
+    ay = np.abs(yawDiff)
+    for lo, hi in [(0, 10), (10, 20), (20, 40), (40, 60), (60, 90), (90, 120), (120, 181)]:
+        m = (ay >= lo) & (ay < hi)
+        if m.sum() == 0:
+            print(f"  [{lo:>3},{hi:>3}) : (нет данных)")
+        else:
+            zero = np.mean(np.abs(dyaw[m]) < ZERO_EPS)
+            print(f"  [{lo:>3},{hi:>3}) : n={m.sum():5d}  mean_dyaw={dyaw[m].mean():+7.3f}  "
+                  f"mean|dyaw|={np.abs(dyaw[m]).mean():6.3f}  zero%={zero:6.2%}")
+    print(f"[diag] |pitchDiff| корзина -> n, mean dpitch(знак), mean|dpitch|, zero%(|dpitch|<{ZERO_EPS}):")
+    ap = np.abs(pitchDiff)
+    for lo, hi in [(0, 10), (10, 20), (20, 40), (40, 60), (60, 90), (90, 120), (120, 181)]:
+        m = (ap >= lo) & (ap < hi)
+        if m.sum() == 0:
+            print(f"  [{lo:>3},{hi:>3}) : (нет данных)")
+        else:
+            zero = np.mean(np.abs(dpitch[m]) < ZERO_EPS)
+            print(f"  [{lo:>3},{hi:>3}) : n={m.sum():5d}  mean_dpitch={dpitch[m].mean():+7.3f}  "
+                  f"mean|dpitch|={np.abs(dpitch[m]).mean():6.3f}  zero%={zero:6.2%}")
+
 
 if __name__ == "__main__":
     main()
