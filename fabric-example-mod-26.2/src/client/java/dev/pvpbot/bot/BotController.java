@@ -9,6 +9,7 @@ import net.minecraft.world.entity.monster.Monster;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.util.Mth;
 
 import dev.pvpbot.config.Config;
@@ -154,20 +155,25 @@ public final class BotController {
             out[1] = Mth.clamp(ra[1], -Config.MAX_YAW_RT, Config.MAX_YAW_RT);
         }
 
-        // deadzone «луч внутри хитбокса»: если уже целимся в цель, гасим коррекцию,
-        // чтобы не раскачиваться на цели (хаос знаков у цели из логов). Вне хитбокса
-        // коррекция идёт полностью — удержать цель важнее идеального центра.
+        // deadzone «луч внутри хитбокса»: гасим коррекцию только когда луч взгляда
+        // реально пересекает AABB цели (точный ray-vs-AABB, а не cone-тест
+        // look·toCenter — на бою 31° конус намного шире хитбокса и включал
+        // deadzone даже вне цели, ослабляя наводку). Вне хитбокса коррекция идёт
+        // полностью — удержать цель важнее идеального центра, но и дёргаться на
+        // цели не надо.
         Vec3 eye = self.getEyePosition();
-        Vec3 center = new Vec3(opp.getX(), opp.getY() + opp.getBbHeight() * 0.5, opp.getZ());
         Vec3 look = self.getLookAngle().normalize();
-        Vec3 toOpp = center.subtract(eye).normalize();
-        float aimCos = (float) look.dot(toOpp);
-        lastAimInside = aimCos > Config.AIM_COS;
+        lastAimInside = rayHitsAABB(eye, look, opp.getBoundingBox());
         if (lastAimInside) {
             float damp = 0.15f;
             out[0] *= damp;
             out[1] *= damp;
         }
+
+        // порог удара — прежний мягкий cone-тест (≈31°), он шире строгого AABB.
+        Vec3 center = new Vec3(opp.getX(), opp.getY() + opp.getBbHeight() * 0.5, opp.getZ());
+        Vec3 toOpp = center.subtract(eye).normalize();
+        float aimCos = (float) look.dot(toOpp);
 
         // усиление выхода прицеливания: модель имитирует маленькие поправки учителя
         // (П-регулятор с остаточной ошибкой ~25-35°). Gain доворачивает до центра;
@@ -213,6 +219,30 @@ public final class BotController {
         } else if (out[Config.BLOCK_CH] <= 0.5f && self.isUsingItem()) {
             self.stopUsingItem();
         }
+    }
+
+    /** Пересекает ли луч (origin + t*dir, t>=0) AABB цели. Собственный slab-тест
+     *  (entity AABB в MC axis-aligned). Точный «луч в хитбоксе» вместо cone-теста
+     *  look·toCenter, который включал deadzone даже вне цели. */
+    private static boolean rayHitsAABB(Vec3 origin, Vec3 dir, AABB box) {
+        double tmin = -1e9, tmax = 1e9;
+        double[] o = {origin.x, origin.y, origin.z};
+        double[] d = {dir.x, dir.y, dir.z};
+        double[] lo = {box.minX, box.minY, box.minZ};
+        double[] hi = {box.maxX, box.maxY, box.maxZ};
+        for (int i = 0; i < 3; i++) {
+            if (Math.abs(d[i]) < 1e-8) {
+                if (o[i] < lo[i] || o[i] > hi[i]) return false;
+            } else {
+                double t1 = (lo[i] - o[i]) / d[i];
+                double t2 = (hi[i] - o[i]) / d[i];
+                if (t1 > t2) { double tmp = t1; t1 = t2; t2 = tmp; }
+                tmin = Math.max(tmin, t1);
+                tmax = Math.min(tmax, t2);
+                if (tmin > tmax) return false;
+            }
+        }
+        return tmax >= 0.0;
     }
 
     /** Плавный доворот взгляда между тиками (вызывается каждый кадр). Решение о
