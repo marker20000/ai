@@ -42,31 +42,35 @@ def knn_predict(idx_X, idx_Y, q_X, k, circ_cols=None, ww_arr=None):
     метрику RecAim.dist2: d2 = Σ_w Σ_f FEAT_W[f]*TEMP_W[w]*diff², плюс
     циклическая поправка для yaw_diff (свёртка разности по окружности к
     (-180,180]°), как в игре."""
+    raw_idx = idx_X.astype(np.float32)
+    raw_q = q_X.astype(np.float32)
     if ww_arr is not None:
         sw = np.sqrt(ww_arr.astype(np.float32))
-        idx_X = idx_X.astype(np.float32) * sw
-        q_X = q_X.astype(np.float32) * sw
-    else:
-        idx_X = idx_X.astype(np.float32)
-        q_X = q_X.astype(np.float32)
+        idx_X = raw_idx * sw
+        q_X = raw_q * sw
     idx_sq = (idx_X * idx_X).sum(axis=1)  # (M,)
     nq = q_X.shape[0]
     out = np.zeros((nq, 2), dtype=np.float64)
     CH = 256  # запросов в чанке, чтобы не раздуть матрицу расстояний
     for start in range(0, nq, CH):
-        chunk = q_X[start:start + CH]                     # (b, D)
+        chunk = q_X[start:start + CH]                     # (b, D) взвешенные
+        raw_chunk = raw_q[start:start + CH]               # (b, D) сырые (для циклики)
         csq = (chunk * chunk).sum(axis=1)[:, None]        # (b, 1)
         d2 = csq + idx_sq[None, :] - 2.0 * (chunk @ idx_X.T)  # (b, M)
-        # циклическая поправка для yaw_diff: входы уже взвешены sqrt(FEAT_W*TEMP_W),
-        # поэтому евклидов вклад равен FEAT_W*TEMP_W*(eucl²); заменяем его на
-        # FEAT_W*TEMP_W*(circ²), где circ — разность, свёрнутая по окружности к
-        # (-180,180]° (как в RecAim.dist2, но веса уже внутри eucl/circ).
-        if circ_cols is not None:
+        # циклическая поправка для yaw_diff: свёртку по окружности надо делать на
+        # СЫРОМ нормализованном yaw_diff (до весов) — иначе не совпадает с
+        # RecAim.dist2. В Java: diff = wrapDegrees((a-b)*180)/180, затем
+        # AIM_W*TEMP_W*diff². Евклидов вклад в d2 уже равен ww*eucl_raw² (взвешенный),
+        # поэтому добавляем ww*(circ_raw² - eucl_raw²), где eucl_raw/circ_raw — СЫРЫЕ
+        # разности, а circ_raw получен свёрткой сырой разности (wrap — нелинеен, веса
+        # применяем только к итоговому квадрату, как в Java).
+        if circ_cols is not None and ww_arr is not None:
             corr = np.zeros((chunk.shape[0], idx_X.shape[0]), dtype=np.float64)
             for c in circ_cols:
-                eucl = chunk[:, c, None] - idx_X[None, :, c]                       # (b, M)
-                circ = ((eucl * 180.0 + 180.0) % 360.0 - 180.0) / 180.0           # к (-1,1]
-                corr += circ * circ - eucl * eucl
+                eucl = raw_chunk[:, c, None] - raw_idx[None, :, c]               # (b, M) сырая
+                circ = ((eucl * 180.0 + 180.0) % 360.0 - 180.0) / 180.0         # к (-1,1]
+                ww = ww_arr[c].astype(np.float64)
+                corr += ww * (circ * circ - eucl * eucl)
             d2 = d2 + corr
         np.maximum(d2, 0.0, out=d2)
         kk = min(k, d2.shape[1])
