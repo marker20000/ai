@@ -108,7 +108,15 @@ def evaluate(X, Y, window, k, index_n, query_n, seed):
                      dtype=np.float32)
     fw = np.tile(np.array(FEAT_W, dtype=np.float32), window)        # FEAT_W[f]
     tw = np.repeat(temp_w, len(FEAT_SEL))                          # TEMP_W[w]
-    ww = fw * tw                                                   # FEAT_W[f]*TEMP_W[w]
+    # доп. буст yaw_diff(поз.1)/pitch_diff(поз.2) на последних RECENT_N кадрах —
+    # свежая угловая ошибка должна доминировать над историей (анализ #9). Зеркало
+    # RecAim.dist2: ww = FEAT_W[f]*TEMP_W[w]*boost, boost=RECENT_BOOST на свежих
+    # yaw/pitch, иначе 1.0.
+    recent_mul = np.ones(window * len(FEAT_SEL), dtype=np.float32)
+    for w in range(window - RECENT_N, window):
+        recent_mul[w * len(FEAT_SEL) + 1] = RECENT_BOOST   # yaw_diff
+        recent_mul[w * len(FEAT_SEL) + 2] = RECENT_BOOST   # pitch_diff
+    ww = fw * tw * recent_mul
     pred = knn_predict(idx_X[:, cols], idx_Y, q_X[:, cols], k,
                        circ_cols=circ_cols, ww_arr=ww)
 
@@ -145,6 +153,12 @@ FEAT_SEL = [6, 7, 8, 27, 28, 29]
 # pitch_diff) и aim_center — сосед выбирается по ПОХОЖЕЙ ОШИБКЕ ПРИЦЕЛА, а не по
 # случайным признакам состояния. Должны совпадать с AIM_W в RecAim.java.
 FEAT_W = [0.5, 4.0, 4.0, 1.0, 1.0, 2.0]  # dist, yaw_diff, pitch_diff, tar_fwd, tar_side, aim_center
+
+# Зеркало RecAim.java: на последних RECENT_N кадрах окна yaw_diff (поз.1) и
+# pitch_diff (поз.2) получают доп. буст, чтобы свежая угловая ошибка доминировала
+# над историей (анализ #9). Умеренный, без фанатизма.
+RECENT_N = 4
+RECENT_BOOST = 2.5
 
 
 def _aim_cols(window, feat_sel):

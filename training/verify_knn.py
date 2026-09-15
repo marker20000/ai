@@ -14,13 +14,20 @@ import aim_knn as ak
 WINDOW = config.WINDOW
 FEAT_SEL = ak.FEAT_SEL
 FEAT_W = ak.FEAT_W
+RECENT_N = ak.RECENT_N
+RECENT_BOOST = ak.RECENT_BOOST
 yaw_pos = FEAT_SEL.index(7)
 circ_cols = [w * len(FEAT_SEL) + yaw_pos for w in range(WINDOW)]
 temp_w = np.array([0.15 + 0.85 * (w / (WINDOW - 1)) for w in range(WINDOW)],
                   dtype=np.float32)
 fw = np.tile(np.array(FEAT_W, dtype=np.float32), WINDOW)
 tw = np.repeat(temp_w, len(FEAT_SEL))
-ww = fw * tw
+# зеркало evaluate(): буст yaw_diff(поз.1)/pitch_diff(поз.2) на последних RECENT_N кадрах
+recent_mul = np.ones(WINDOW * len(FEAT_SEL), dtype=np.float32)
+for w in range(WINDOW - RECENT_N, WINDOW):
+    recent_mul[w * len(FEAT_SEL) + 1] = RECENT_BOOST
+    recent_mul[w * len(FEAT_SEL) + 2] = RECENT_BOOST
+ww = fw * tw * recent_mul
 
 
 def java_dist2(a, b):
@@ -32,7 +39,8 @@ def java_dist2(a, b):
             if FEAT_SEL[f] == 7:
                 deg = ((diff * 180.0 + 180.0) % 360.0) - 180.0
                 diff = deg / 180.0
-            d2 += FEAT_W[f] * temp_w[w] * diff * diff
+            boost = RECENT_BOOST if (w >= WINDOW - RECENT_N and FEAT_SEL[f] in (7, 8)) else 1.0
+            d2 += FEAT_W[f] * temp_w[w] * boost * diff * diff
     return d2
 
 

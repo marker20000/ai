@@ -65,6 +65,14 @@ public final class RecAim {
             TEMP_W[w] = 0.15f + 0.85f * (w / (float) (W - 1));
     }
 
+    // Доп. буст угловой ошибки (yaw_diff/pitch_diff) на последних кадрах окна:
+    // именно СВЕЖАЯ ошибка должна доминировать над старой историей и прочими
+    // признаками (анализ #9: при больших ошибках KNN тянуло в «нулевые» соседи,
+    // т.к. текущий yaw_diff не пересиливал историю/другие признаки). Умеренный
+    // (×2.5), не экстремальный — иначе retrieval дёргался бы на шуме 1-2 кадров.
+    private static final int RECENT_N = 4;
+    private static final float RECENT_BOOST = 2.5f;
+
     // Во сколько раз типичная ближайшая дистанция должна быть превышена, чтобы
     // состояние считалось вне распределения (OOD). Подбирается опытным путём.
     private static final float OOD_FACTOR = 5.0f;
@@ -175,9 +183,11 @@ public final class RecAim {
     /** Взвешенное (по AIM_W) квадратичное расстояние между двумя 96-мерными
      *  окнами: доминируют признаки ошибки прицеливания. */
     private static float dist2(float[] a, float[] b) {
+        final int W = Config.WINDOW;
         float d2 = 0f;
-        for (int w = 0; w < Config.WINDOW; w++) {
+        for (int w = 0; w < W; w++) {
             int base = w * FEAT_SEL.length;
+            boolean recent = w >= W - RECENT_N;
             for (int f = 0; f < FEAT_SEL.length; f++) {
                 float diff;
                 if (FEAT_SEL[f] == 7) {
@@ -189,7 +199,12 @@ public final class RecAim {
                 } else {
                     diff = a[base + f] - b[base + f];
                 }
-                d2 += AIM_W[f] * TEMP_W[w] * diff * diff;
+                // на последних RECENT_N кадрах дополнительно усиливаем yaw_diff/pitch_diff,
+                // чтобы СВЕЖАЯ угловая ошибка доминировала над старой историей/другими
+                // признаками (анализ #9: иначе KNN при больших ошибках тянуло в «нулевые»
+                // соседи). Без фанатизма — ×RECENT_BOOST, не ×10.
+                float boost = (recent && (FEAT_SEL[f] == 7 || FEAT_SEL[f] == 8)) ? RECENT_BOOST : 1.0f;
+                d2 += AIM_W[f] * TEMP_W[w] * boost * diff * diff;
             }
         }
         return d2;
