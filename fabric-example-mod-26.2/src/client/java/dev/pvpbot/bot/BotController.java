@@ -88,10 +88,6 @@ public final class BotController {
 
     public void onTick(Minecraft client) {
         if (!enabled) return;
-        if (model == null) {
-            if (dbg++ % 40 == 0) System.out.println("[pvpbot] @bot ВКЛ, но модель не загружена (нет model.bin в config/pvpbot?)");
-            return;
-        }
         LocalPlayer self = client.player;
         if (self == null || client.level == null) return;
         LivingEntity opp = nearestOpponent(client, self);
@@ -105,6 +101,7 @@ public final class BotController {
         float pitchAtF = self.getXRot();
         Vec3 oppAtF = new Vec3(opp.getX(), opp.getY(), opp.getZ());
         float[] s = StateVector.collect(self, opp, prevOpp, prevYaw, prevPitch, false);
+        float pitchDiff = StateVector.pitchDiffTo(self, opp);
 
         // сдвиговое окно: сдвигаем влево на FEATURE_DIM, кладём новый тик в конец
         if (count < Config.INPUT_DIM) {
@@ -116,19 +113,31 @@ public final class BotController {
             System.arraycopy(s, 0, window, Config.INPUT_DIM - Config.FEATURE_DIM, Config.FEATURE_DIM);
         }
 
-        float[] out = model.forward(window);
-        apply(self, client, opp, out, window);
+        // Инференс: MLP, либо чистый retrieval-режим (@rec) без загруженного MLP.
+        float[] out;
+        if (model != null) {
+            out = model.forward(window);
+        } else if (useRecAim && recAim != null) {
+            // без MLP: aim берёт retrieval, атака/блок — простой порог по дистанции
+            // (удар всё равно сработает только при совпадении взгляда с хитбоксом, см. apply).
+            out = new float[Config.TARGET_DIM];
+            out[Config.ATTACK_CH] = (self.distanceToSqr(opp) <= Config.REACH * Config.REACH) ? 1f : 0f;
+        } else {
+            if (dbg++ % 40 == 0) System.out.println("[pvpbot] @bot ВКЛ, но нет model.bin и recAim — нечего применять");
+            return;
+        }
+        apply(self, client, opp, out, window, pitchDiff);
         // запоминаем состояние до применения действия — для признаков скорости на след. тике
         prevYaw = yawAtF;
         prevPitch = pitchAtF;
         prevOpp = oppAtF;
         if (dbg++ % 20 == 0) {
-            System.out.println(String.format("[pvpbot] цель=%s d=%.1f fwd=%.2f str=%.2f atk=%.2f blk=%.2f",
-                opp.getName().getString(), Math.sqrt(self.distanceToSqr(opp)), lastFwd, lastStrafe, out[4], out[5]));
+            System.out.println(String.format("[pvpbot] цель=%s d=%.1f out1(dpitch)=%.3f pitchDiff=%.2f fwd=%.2f str=%.2f atk=%.2f blk=%.2f",
+                opp.getName().getString(), Math.sqrt(self.distanceToSqr(opp)), out[1], pitchDiff, lastFwd, lastStrafe, out[4], out[5]));
         }
     }
 
-    private void apply(LocalPlayer self, Minecraft client, LivingEntity opp, float[] out, float[] window) {
+    private void apply(LocalPlayer self, Minecraft client, LivingEntity opp, float[] out, float[] window, float pitchDiff) {
         // --- Наводка ---
         // Обычно дельты (out[0]/out[1]) даёт MLP. В режиме retrieval-аима их берём
         // из ближайшего окна в датасете друга (RecAim.aim) — это imitation через
@@ -149,7 +158,15 @@ public final class BotController {
         // Сеть (или retrieval) лишь СТАВИТ ЦЕЛЬ (tgtYaw/tgtPitch); сам плавный доворот
         // между кадрами делает smoothAimFrame() (Mth.rotLerp) — без дёрганья. ---
         tgtYaw = (float) Mth.wrapDegrees(self.getYRot() + Mth.clamp(out[0], -Config.MAX_YAW_RT, Config.MAX_YAW_RT));
-        tgtPitch = (float) Mth.clamp(self.getXRot() + Mth.clamp(out[1], -Config.MAX_YAW_RT, Config.MAX_YAW_RT), -90.0F, 90.0F);
+        // анти-клинч: гасим систематический drift взгляда в rail (±80°). Если выход
+        // сети/retrieval толкает pitch ЕЩЁ дальше в ту же сторону, что и текущий
+        // угол — это bias данных, а не цель; не даём заклинить взгляд в потолок/пол.
+        float pd = Mth.clamp(out[1], -Config.MAX_YAW_RT, Config.MAX_YAW_RT);
+        float pitchNow = self.getXRot();
+        if (Math.abs(pitchNow) > 80.0f && Math.signum(pd) == Math.signum(pitchNow)) {
+            pd = 0f;
+        }
+        tgtPitch = (float) Mth.clamp(pitchNow + pd, -90.0F, 90.0F);
         aimTarget = true;
 
         double dist = Math.sqrt(self.distanceToSqr(opp));

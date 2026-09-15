@@ -96,7 +96,7 @@ def _parse_arr(s, k):
 def _parse_line(line):
     try:
         obj = json.loads(line)
-        if len(obj["state"]) == 27 and len(obj["target"]) == 6:
+        if len(obj["state"]) == 30 and len(obj["target"]) == 6:
             return obj
         return None
     except ValueError:
@@ -105,7 +105,7 @@ def _parse_line(line):
         ti = line.find('target":[') + len('target":[')
         se = line.find("]", si)
         te = line.find("]", ti)
-        s = _parse_arr(line[si:se + 1], 27)
+        s = _parse_arr(line[si:se + 1], 30)
         t = _parse_arr(line[ti:te + 1], 6)
         if s is None or t is None:
             return None
@@ -129,9 +129,9 @@ def load_episodes(src):
                     continue
                 s, t = row["state"], row["target"]
                 # пропускаем битые строки (локальные запятые иногда неоднозначны)
-                if len(s) != 27 or len(t) != 6:
+                if len(s) != 30 or len(t) != 6:
                     print(f"[convert] WARN {os.path.basename(f)}: пропущена строка "
-                          f"(state={len(s)} target={len(t)}, ожидалось 27/6)")
+                          f"(state={len(s)} target={len(t)}, ожидалось 30/6)")
                     continue
                 states.append(s)
                 targets.append(t)

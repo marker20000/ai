@@ -102,6 +102,21 @@ public final class StateVector {
         return f;
     }
 
+    /** Ошибка прицеливания по pitch (desiredPitch − текущий pitch) — ровно как в
+     *  collect(), но без сборки всей 30-меры. Нужно для дебага bias наводки
+     *  (сравнения out[1] сети/retrieval и реальной ошибки) в BotController. */
+    public static float pitchDiffTo(LocalPlayer self, LivingEntity opp) {
+        Vec3 selfEye = self.getEyePosition();
+        double oppX = opp.getX(), oppY = opp.getY(), oppZ = opp.getZ();
+        double oppCenterY = oppY + opp.getBbHeight() * 0.5;
+        double dx = oppX - self.getX();
+        double dy = oppCenterY - selfEye.y;
+        double dz = oppZ - self.getZ();
+        double hdist = Math.sqrt(dx * dx + dz * dz);
+        double desiredPitch = Math.toDegrees(Math.atan2(-dy, hdist));
+        return (float) (desiredPitch - self.getXRot());
+    }
+
     /** Целевые действия игрока на этот тик (для imitation learning). */
     public static float[] target(LocalPlayer self,
                                  float prevSelfYaw, float prevSelfPitch, boolean attackedThisTick) {
