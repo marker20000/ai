@@ -241,14 +241,21 @@ public final class BotController {
             float absYawError = Math.abs(yawError);
             float absPitchError = Math.abs(pitchError);
             
-            // Adaptive gain для tracking: при быстром движении цели усиливаем действия
+            // Извлекаем скорости движения для адаптации
             float tarVelX = window[lastFrame + 3] * Config.MAX_SPEED;
+            float tarVelY = window[lastFrame + 4] * Config.MAX_SPEED;
             float tarVelZ = window[lastFrame + 5] * Config.MAX_SPEED;
             float tarSpeed = (float) Math.sqrt(tarVelX * tarVelX + tarVelZ * tarVelZ);
             
-            if (tarSpeed > 0.25f) {
-                // Boost от 1.0x до 1.5x при скорости 0.25-0.5 блока/тик
-                float boost = 1.0f + Math.min(0.5f, tarSpeed * 0.8f);
+            float selfVelX = window[lastFrame + 0] * Config.MAX_SPEED;
+            float selfVelZ = window[lastFrame + 2] * Config.MAX_SPEED;
+            float selfSpeed = (float) Math.sqrt(selfVelX * selfVelX + selfVelZ * selfVelZ);
+            
+            // Adaptive boost для tracking: при быстром движении цели ИЛИ своём движении усиливаем действия
+            float totalMotion = tarSpeed + selfSpeed * 0.7f; // своё движение влияет меньше
+            if (totalMotion > 0.2f) {
+                // Boost от 1.0x до 2.0x при активном движении
+                float boost = 1.0f + Math.min(1.0f, totalMotion * 1.2f);
                 rawDyaw *= boost;
                 rawDpitch *= boost;
                 // Переклэмпить после boost
@@ -256,24 +263,27 @@ public final class BotController {
                 rawDpitch = Mth.clamp(rawDpitch, -Config.MAX_YAW_RT, Config.MAX_YAW_RT);
             }
             
-            // Адаптивное сглаживание: зависит от величины ошибки
-            // При больших ошибках (>30°) — меньше сглаживания (быстрая реакция)
-            // При малых ошибках (<10°) — больше сглаживания (плавная доводка)
+            // Адаптивное сглаживание: зависит от величины ошибки И скорости движения
+            // При активном движении — меньше сглаживания (успевать за целью)
+            // При больших ошибках — меньше сглаживания (быстрая реакция)
             float dynamicAlpha;
-            if (absYawError > 30f || absPitchError > 30f) {
-                dynamicAlpha = 0.65f; // быстрая реакция на большой ошибке
+            if (totalMotion > 0.3f) {
+                // Активное движение — быстрая реакция, чтобы успевать
+                dynamicAlpha = 0.75f;
+            } else if (absYawError > 30f || absPitchError > 30f) {
+                dynamicAlpha = 0.70f; // быстрая реакция на большой ошибке
             } else if (absYawError > 10f || absPitchError > 10f) {
-                dynamicAlpha = 0.45f; // средняя скорость
+                dynamicAlpha = 0.50f; // средняя скорость
             } else {
-                dynamicAlpha = 0.25f; // медленная плавная доводка
+                dynamicAlpha = 0.30f; // медленная плавная доводка
             }
             
             // EMA сглаживание с адаптивным alpha
             smoothedDyaw = dynamicAlpha * rawDyaw + (1f - dynamicAlpha) * smoothedDyaw;
             smoothedDpitch = dynamicAlpha * rawDpitch + (1f - dynamicAlpha) * smoothedDpitch;
             
-            // Микро-коррекции для человекоподобности (только при малой ошибке)
-            if (absYawError < 15f && absPitchError < 15f) {
+            // Микро-коррекции для человекоподобности (только при малой ошибке И без активного движения)
+            if (absYawError < 15f && absPitchError < 15f && totalMotion < 0.2f) {
                 microAdjustPhase += MICRO_ADJUST_FREQUENCY;
                 float microYaw = (float) (Math.sin(microAdjustPhase * 2.0) * MICRO_ADJUST_AMPLITUDE);
                 float microPitch = (float) (Math.cos(microAdjustPhase * 1.7) * MICRO_ADJUST_AMPLITUDE * 0.6);
@@ -282,15 +292,15 @@ public final class BotController {
             }
             
             // Небольшой овершут при приближении к цели (имитация человеческого перемахивания)
-            // Только если ошибка уменьшается (движемся к цели)
+            // Только если ошибка уменьшается (движемся к цели) И нет активного движения
             boolean yawImproving = Math.abs(yawError) < Math.abs(lastYawError);
             boolean pitchImproving = Math.abs(pitchError) < Math.abs(lastPitchError);
             
-            if (yawImproving && absYawError < 20f && absYawError > 3f) {
+            if (yawImproving && absYawError < 20f && absYawError > 3f && totalMotion < 0.2f) {
                 // Добавляем 8% овершута в направлении коррекции
                 smoothedDyaw *= 1.08f;
             }
-            if (pitchImproving && absPitchError < 20f && absPitchError > 3f) {
+            if (pitchImproving && absPitchError < 20f && absPitchError > 3f && totalMotion < 0.2f) {
                 smoothedDpitch *= 1.08f;
             }
             
@@ -299,9 +309,12 @@ public final class BotController {
             lastPitchError = pitchError;
             
             // Дополнительное ограничение скорости изменения (rate limit)
-            // Адаптивное: быстрее при больших ошибках, медленнее при малых
+            // Адаптивное: быстрее при больших ошибках И при активном движении
             float maxDelta;
-            if (absYawError > 40f || absPitchError > 40f) {
+            if (totalMotion > 0.3f) {
+                // При активном движении — почти максимальная скорость, чтобы успевать
+                maxDelta = Config.MAX_YAW_RT * 1.0f;
+            } else if (absYawError > 40f || absPitchError > 40f) {
                 maxDelta = Config.MAX_YAW_RT * 0.95f; // почти максимум
             } else if (absYawError > 15f || absPitchError > 15f) {
                 maxDelta = Config.MAX_YAW_RT * 0.75f; // средняя скорость
@@ -313,19 +326,16 @@ public final class BotController {
             out[1] = Mth.clamp(smoothedDpitch, -maxDelta, maxDelta);
         }
 
-        // deadzone «луч внутри хитбокса»: гасим коррекцию только когда луч взгляда
-        // реально пересекает AABB цели (точный ray-vs-AABB, а не cone-тест
-        // look·toCenter — на бою 31° конус намного шире хитбокса и включал
-        // deadzone даже вне цели, ослабляя наводку). Вне хитбокса коррекция идёт
-        // полностью — удержать цель важнее идеального центра, но и дёргаться на
-        // цели не надо.
+        // deadzone «луч внутри хитбокса»: ПОЛНОСТЬЮ останавливаем камеру, когда луч
+        // реально пересекает AABB цели — так человек держит прицел на цели.
+        // Это убирает палевное дёрганье камеры внутри хитбокса при страйфе.
         Vec3 eye = self.getEyePosition();
         Vec3 look = self.getLookAngle().normalize();
         lastAimInside = rayHitsAABB(eye, look, opp.getBoundingBox());
         if (lastAimInside) {
-            float damp = 0.15f;
-            out[0] *= damp;
-            out[1] *= damp;
+            // ПОЛНАЯ остановка камеры — прицел на цели, дальше двигать не нужно
+            out[0] = 0f;
+            out[1] = 0f;
         }
 
         // порог удара — прежний мягкий cone-тест (≈31°), он шире строгого AABB.
