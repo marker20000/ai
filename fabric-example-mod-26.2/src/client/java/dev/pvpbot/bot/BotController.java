@@ -63,6 +63,15 @@ public final class BotController {
     private float smoothedDyaw = 0f;
     private float smoothedDpitch = 0f;
     private static final float SMOOTH_ALPHA = 0.4f; // увеличено с 0.35 до 0.4 для более быстрой реакции
+    
+    // Человекоподобные микро-коррекции
+    private float microAdjustPhase = 0f; // фаза для органичных колебаний
+    private static final float MICRO_ADJUST_AMPLITUDE = 0.15f; // амплитуда микро-дрожания (градусы)
+    private static final float MICRO_ADJUST_FREQUENCY = 0.08f; // частота микро-коррекций
+    
+    // Адаптивная скорость наводки в зависимости от расстояния до цели
+    private float lastYawError = 0f;
+    private float lastPitchError = 0f;
 
     public boolean isEnabled() { return enabled; }
     public boolean isModelLoaded() { return model != null; }
@@ -107,6 +116,9 @@ public final class BotController {
             count = 0; dbg = 0;
             lastFwd = 0f; lastStrafe = 0f;
             smoothedDyaw = 0f; smoothedDpitch = 0f; // сброс сглаживания
+            microAdjustPhase = 0f;
+            lastYawError = 0f;
+            lastPitchError = 0f;
             LocalPlayer p = client.player;
             if (p != null) { 
                 prevYaw = p.getYRot(); 
@@ -222,8 +234,14 @@ public final class BotController {
             float rawDyaw = Mth.clamp(ra[0], -Config.MAX_YAW_RT, Config.MAX_YAW_RT);
             float rawDpitch = Mth.clamp(ra[1], -Config.MAX_YAW_RT, Config.MAX_YAW_RT);
             
-            // Adaptive gain для tracking: при быстром движении цели усиливаем действия
+            // Извлекаем текущие ошибки прицеливания из state vector
             int lastFrame = (Config.WINDOW - 1) * Config.FEATURE_DIM;
+            float yawError = window[lastFrame + 7] * 180.0f; // денормализуем yawDiff
+            float pitchError = window[lastFrame + 8] * 90.0f; // денормализуем pitchDiff
+            float absYawError = Math.abs(yawError);
+            float absPitchError = Math.abs(pitchError);
+            
+            // Adaptive gain для tracking: при быстром движении цели усиливаем действия
             float tarVelX = window[lastFrame + 3] * Config.MAX_SPEED;
             float tarVelZ = window[lastFrame + 5] * Config.MAX_SPEED;
             float tarSpeed = (float) Math.sqrt(tarVelX * tarVelX + tarVelZ * tarVelZ);
@@ -238,14 +256,59 @@ public final class BotController {
                 rawDpitch = Mth.clamp(rawDpitch, -Config.MAX_YAW_RT, Config.MAX_YAW_RT);
             }
             
-            // EMA сглаживание для плавности: новое значение = alpha*raw + (1-alpha)*старое
-            // Это убирает резкие скачки и делает наводку плавной как у человека
-            smoothedDyaw = SMOOTH_ALPHA * rawDyaw + (1f - SMOOTH_ALPHA) * smoothedDyaw;
-            smoothedDpitch = SMOOTH_ALPHA * rawDpitch + (1f - SMOOTH_ALPHA) * smoothedDpitch;
+            // Адаптивное сглаживание: зависит от величины ошибки
+            // При больших ошибках (>30°) — меньше сглаживания (быстрая реакция)
+            // При малых ошибках (<10°) — больше сглаживания (плавная доводка)
+            float dynamicAlpha;
+            if (absYawError > 30f || absPitchError > 30f) {
+                dynamicAlpha = 0.65f; // быстрая реакция на большой ошибке
+            } else if (absYawError > 10f || absPitchError > 10f) {
+                dynamicAlpha = 0.45f; // средняя скорость
+            } else {
+                dynamicAlpha = 0.25f; // медленная плавная доводка
+            }
+            
+            // EMA сглаживание с адаптивным alpha
+            smoothedDyaw = dynamicAlpha * rawDyaw + (1f - dynamicAlpha) * smoothedDyaw;
+            smoothedDpitch = dynamicAlpha * rawDpitch + (1f - dynamicAlpha) * smoothedDpitch;
+            
+            // Микро-коррекции для человекоподобности (только при малой ошибке)
+            if (absYawError < 15f && absPitchError < 15f) {
+                microAdjustPhase += MICRO_ADJUST_FREQUENCY;
+                float microYaw = (float) (Math.sin(microAdjustPhase * 2.0) * MICRO_ADJUST_AMPLITUDE);
+                float microPitch = (float) (Math.cos(microAdjustPhase * 1.7) * MICRO_ADJUST_AMPLITUDE * 0.6);
+                smoothedDyaw += microYaw;
+                smoothedDpitch += microPitch;
+            }
+            
+            // Небольшой овершут при приближении к цели (имитация человеческого перемахивания)
+            // Только если ошибка уменьшается (движемся к цели)
+            boolean yawImproving = Math.abs(yawError) < Math.abs(lastYawError);
+            boolean pitchImproving = Math.abs(pitchError) < Math.abs(lastPitchError);
+            
+            if (yawImproving && absYawError < 20f && absYawError > 3f) {
+                // Добавляем 8% овершута в направлении коррекции
+                smoothedDyaw *= 1.08f;
+            }
+            if (pitchImproving && absPitchError < 20f && absPitchError > 3f) {
+                smoothedDpitch *= 1.08f;
+            }
+            
+            // Сохраняем текущие ошибки для следующего тика
+            lastYawError = yawError;
+            lastPitchError = pitchError;
             
             // Дополнительное ограничение скорости изменения (rate limit)
-            // Максимальное изменение за тик — 80% от MAX_YAW_RT для плавности
-            float maxDelta = Config.MAX_YAW_RT * 0.8f;
+            // Адаптивное: быстрее при больших ошибках, медленнее при малых
+            float maxDelta;
+            if (absYawError > 40f || absPitchError > 40f) {
+                maxDelta = Config.MAX_YAW_RT * 0.95f; // почти максимум
+            } else if (absYawError > 15f || absPitchError > 15f) {
+                maxDelta = Config.MAX_YAW_RT * 0.75f; // средняя скорость
+            } else {
+                maxDelta = Config.MAX_YAW_RT * 0.5f; // медленная точная доводка
+            }
+            
             out[0] = Mth.clamp(smoothedDyaw, -maxDelta, maxDelta);
             out[1] = Mth.clamp(smoothedDpitch, -maxDelta, maxDelta);
         }

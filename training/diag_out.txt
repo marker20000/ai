@@ -1,0 +1,52 @@
+[diag] тиков=4925  state_dim=30 target_dim=6
+[diag] распределени€ (град):
+  yawDiff   : min= -179.61 max=  179.83 mean=   0.43 std=  44.59
+  pitchDiff : min= -108.16 max=   92.09 mean=   2.94 std=  20.07
+  dyaw      : min=  -22.50 max=   22.50 mean=  -0.03 std=   6.42
+  dpitch    : min=  -22.50 max=   22.50 mean=   0.03 std=   2.86
+[diag] corr(yawDiff, dyaw)   = 0.305   (>=0.9 Ч данные осмысленны)
+[diag] corr(pitchDiff, dpitch)= 0.168   (>=0.9 Ч данные осмысленны)
+[diag] покрытие ошибок (дол€ тиков):
+  |yawDiff|> 30∞: 18.11%   |pitchDiff|> 30∞: 11.13%
+  |yawDiff|> 60∞: 11.43%   |pitchDiff|> 60∞:  1.62%
+  |yawDiff|> 90∞:  8.65%   |pitchDiff|> 90∞:  0.28%
+  |yawDiff|>120∞:  5.26%   |pitchDiff|>120∞:  0.00%
+[diag] дол€ тиков с aim_center>0 (углова€ близость к центру): 76.67%
+[diag] yawDiff диапазон -> mean dyaw (count):
+  [-180,-120) : mean_dyaw= -1.586  (n=114)
+  [-120, -60) : mean_dyaw= -5.855  (n=157)
+  [ -60, -30) : mean_dyaw= -4.993  (n=183)
+  [ -30, -10) : mean_dyaw= -2.853  (n=493)
+  [ -10,   0) : mean_dyaw= -0.585  (n=1506)
+  [   0,  10) : mean_dyaw= +0.198  (n=1562)
+  [  10,  30) : mean_dyaw= +2.343  (n=472)
+  [  30,  60) : mean_dyaw= +6.397  (n=146)
+  [  60, 120) : mean_dyaw= +8.022  (n=147)
+  [ 120, 180) : mean_dyaw= +4.366  (n=145)
+[diag] pitchDiff диапазон -> mean dpitch (count):
+  [-180,-120) :  (нет данных)
+  [-120, -60) : mean_dpitch= +0.642  (n=24)
+  [ -60, -30) : mean_dpitch= +0.411  (n=142)
+  [ -30, -10) : mean_dpitch= -0.824  (n=851)
+  [ -10,   0) : mean_dpitch= -0.431  (n=1203)
+  [   0,  10) : mean_dpitch= -0.040  (n=1241)
+  [  10,  30) : mean_dpitch= +0.822  (n=1082)
+  [  30,  60) : mean_dpitch= +1.356  (n=326)
+  [  60, 120) : mean_dpitch= +0.088  (n=56)
+  [ 120, 180) :  (нет данных)
+[diag] |yawDiff| корзина -> n, mean dyaw(знак), mean|dyaw|, zero%(|dyaw|<0.5):
+  [  0, 10) : n= 3068  mean_dyaw= -0.187  mean|dyaw|= 1.859  zero%=46.48%
+  [ 10, 20) : n=  634  mean_dyaw= +0.010  mean|dyaw|= 4.447  zero%=20.82%
+  [ 20, 40) : n=  491  mean_dyaw= -0.818  mean|dyaw|= 6.484  zero%=18.13%
+  [ 40, 60) : n=  169  mean_dyaw= +0.680  mean|dyaw|= 9.217  zero%=18.93%
+  [ 60, 90) : n=  137  mean_dyaw= +0.613  mean|dyaw|=10.331  zero%=16.79%
+  [ 90,120) : n=  167  mean_dyaw= +1.054  mean|dyaw|= 6.873  zero%=37.13%
+  [120,181) : n=  259  mean_dyaw= +1.746  mean|dyaw|= 4.240  zero%=43.63%
+[diag] |pitchDiff| корзина -> n, mean dpitch(знак), mean|dpitch|, zero%(|dpitch|<0.5):
+  [  0, 10) : n= 2444  mean_dpitch= -0.233  mean|dpitch|= 1.615  zero%=38.63%
+  [ 10, 20) : n= 1305  mean_dpitch= +0.043  mean|dpitch|= 1.915  zero%=30.88%
+  [ 20, 40) : n=  934  mean_dpitch= +0.355  mean|dpitch|= 2.256  zero%=26.34%
+  [ 40, 60) : n=  162  mean_dpitch= +1.852  mean|dpitch|= 2.722  zero%=20.37%
+  [ 60, 90) : n=   66  mean_dpitch= +0.263  mean|dpitch|= 1.067  zero%=71.21%
+  [ 90,120) : n=   14  mean_dpitch= +0.214  mean|dpitch|= 0.429  zero%=71.43%
+  [120,181) : (нет данных)
