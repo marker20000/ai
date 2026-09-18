@@ -1,0 +1,12 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "dev.pvpbot.mixin",
+  "compatibilityLevel": "JAVA_25",
+  "client": [
+    "MixinServerboundMovePlayerPacketRot"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

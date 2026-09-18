@@ -22,6 +22,8 @@ import dev.pvpbot.net.RecAim;
  */
 public final class BotController {
     private boolean enabled = false;
+    private boolean silentMode = false; // @silent: камера не движется локально, только на сервере
+    private int leadTicks = 2; // количество тиков для lead compensation (по умолчанию 2)
     private Model model = null;
     private RecAim recAim = null;     // retrieval-индекс (rec_index.bin), опц.
     private boolean useRecAim = false;
@@ -35,6 +37,10 @@ public final class BotController {
     private float lastFwd = 0f;     // применённое (оклэмпенное) движение — для отладки
     private float lastStrafe = 0f;
     private final Random jitter = new Random(); // разброс прицела, чтобы не бить в одну точку
+    
+    // Серверный yaw/pitch для @silent режима
+    private float serverYaw = 0f;
+    private float serverPitch = 0f;
 
     // Плавная наводка: MLP каждый тик ставит ЦЕЛЬ (tgtYaw/tgtPitch), а доворот
     // между тиками делает smoothAimFrame() через Mth.rotLerp — чтобы взгляд не
@@ -44,13 +50,39 @@ public final class BotController {
     private float tgtPitch = 0f;
     private boolean aimTarget = false;
     private boolean lastAimInside = false; // флаг «луч в хитбоксе» для дебага
-    private static final float AIM_PER_TICK = 0.8f; // доля оставшегося пути за тик (независимо от FPS)
-    private static final float AIM_GAIN = 2.5f;      // усиление выхода прицеливания (доводит до центра)
+    
+    // Плавная межкадровая интерполяция: увеличено с 0.8 до 0.95 для плавности по FPS
+    // При 60 FPS (tickDelta ≈ 0.05) это даёт ~0.05 движения за кадр = 20 кадров до цели
+    // Чем ближе к 1.0, тем плавнее (но медленнее), чем ближе к 0.5, тем резче (но быстрее)
+    private static final float AIM_PER_TICK = 0.95f;
+    
+    // Уменьшено с 2.5 до 1.8: меньше резких рывков при больших ошибках
+    private static final float AIM_GAIN = 1.8f;
+    
+    // EMA сглаживание для плавной наводки
+    private float smoothedDyaw = 0f;
+    private float smoothedDpitch = 0f;
+    private static final float SMOOTH_ALPHA = 0.4f; // увеличено с 0.35 до 0.4 для более быстрой реакции
 
     public boolean isEnabled() { return enabled; }
     public boolean isModelLoaded() { return model != null; }
     public boolean isRecAim() { return useRecAim; }
     public boolean isRecAimLoaded() { return recAim != null; }
+    public boolean isSilentMode() { return silentMode; }
+    public int getLeadTicks() { return leadTicks; }
+    
+    public float getServerYaw() { return serverYaw; }
+    public float getServerPitch() { return serverPitch; }
+    
+    public void setSilentMode(boolean silent) {
+        silentMode = silent;
+        System.out.println("[pvpbot] silent mode=" + silentMode);
+    }
+    
+    public void setLeadTicks(int ticks) {
+        leadTicks = Math.max(0, Math.min(10, ticks)); // 0-10 тиков
+        System.out.println("[pvpbot] lead compensation=" + leadTicks + " ticks");
+    }
 
     public void setRecAim(boolean on, Minecraft client) {
         if (on && recAim == null) {
@@ -74,8 +106,14 @@ public final class BotController {
             }
             count = 0; dbg = 0;
             lastFwd = 0f; lastStrafe = 0f;
+            smoothedDyaw = 0f; smoothedDpitch = 0f; // сброс сглаживания
             LocalPlayer p = client.player;
-            if (p != null) { prevYaw = p.getYRot(); prevPitch = p.getXRot(); }
+            if (p != null) { 
+                prevYaw = p.getYRot(); 
+                prevPitch = p.getXRot();
+                serverYaw = p.getYRot();
+                serverPitch = p.getXRot();
+            }
             prevOpp = null;
         }
         if (!on && client != null) {
@@ -102,7 +140,29 @@ public final class BotController {
         float yawAtF = self.getYRot();
         float pitchAtF = self.getXRot();
         Vec3 oppAtF = new Vec3(opp.getX(), opp.getY(), opp.getZ());
+        
+        // Lead compensation: предсказываем позицию цели на N тиков вперёд для компенсации lag
+        Vec3 oppVel = opp.getDeltaMovement();
+        Vec3 predictedPos = oppAtF.add(oppVel.scale(leadTicks)); // настраиваемое количество тиков
+        
+        // Используем предсказанную позицию для расчёта state vector
         float[] s = StateVector.collect(self, opp, prevOpp, prevYaw, prevPitch, false);
+        
+        // Пересчитываем yawDiff и pitchDiff к предсказанной позиции для признаков 7 и 8
+        Vec3 selfEye = self.getEyePosition();
+        double dx = predictedPos.x - self.getX();
+        double dy = (predictedPos.y + opp.getBbHeight() * 0.5) - selfEye.y;
+        double dz = predictedPos.z - self.getZ();
+        double hdist = Math.sqrt(dx * dx + dz * dz);
+        double desiredYaw = Math.toDegrees(Math.atan2(-dx, dz));
+        double desiredPitch = Math.toDegrees(Math.atan2(-dy, hdist));
+        double yawDiffPredicted = Mth.wrapDegrees(desiredYaw - self.getYRot());
+        double pitchDiffPredicted = desiredPitch - self.getXRot();
+        
+        // Заменяем yawDiff и pitchDiff на предсказанные значения
+        s[7] = (float) (yawDiffPredicted / 180.0);
+        s[8] = (float) (pitchDiffPredicted / 90.0);
+        
         float pitchDiff = StateVector.pitchDiffTo(self, opp);
 
         // запоминаем состояние ДО применения действия — для признаков скорости на
@@ -159,8 +219,35 @@ public final class BotController {
         // от MLP, чтобы не терять логику удара. ---
         if (useRecAim && recAim != null) {
             float[] ra = recAim.aim(window);
-            out[0] = Mth.clamp(ra[0], -Config.MAX_YAW_RT, Config.MAX_YAW_RT);
-            out[1] = Mth.clamp(ra[1], -Config.MAX_YAW_RT, Config.MAX_YAW_RT);
+            float rawDyaw = Mth.clamp(ra[0], -Config.MAX_YAW_RT, Config.MAX_YAW_RT);
+            float rawDpitch = Mth.clamp(ra[1], -Config.MAX_YAW_RT, Config.MAX_YAW_RT);
+            
+            // Adaptive gain для tracking: при быстром движении цели усиливаем действия
+            int lastFrame = (Config.WINDOW - 1) * Config.FEATURE_DIM;
+            float tarVelX = window[lastFrame + 3] * Config.MAX_SPEED;
+            float tarVelZ = window[lastFrame + 5] * Config.MAX_SPEED;
+            float tarSpeed = (float) Math.sqrt(tarVelX * tarVelX + tarVelZ * tarVelZ);
+            
+            if (tarSpeed > 0.25f) {
+                // Boost от 1.0x до 1.5x при скорости 0.25-0.5 блока/тик
+                float boost = 1.0f + Math.min(0.5f, tarSpeed * 0.8f);
+                rawDyaw *= boost;
+                rawDpitch *= boost;
+                // Переклэмпить после boost
+                rawDyaw = Mth.clamp(rawDyaw, -Config.MAX_YAW_RT, Config.MAX_YAW_RT);
+                rawDpitch = Mth.clamp(rawDpitch, -Config.MAX_YAW_RT, Config.MAX_YAW_RT);
+            }
+            
+            // EMA сглаживание для плавности: новое значение = alpha*raw + (1-alpha)*старое
+            // Это убирает резкие скачки и делает наводку плавной как у человека
+            smoothedDyaw = SMOOTH_ALPHA * rawDyaw + (1f - SMOOTH_ALPHA) * smoothedDyaw;
+            smoothedDpitch = SMOOTH_ALPHA * rawDpitch + (1f - SMOOTH_ALPHA) * smoothedDpitch;
+            
+            // Дополнительное ограничение скорости изменения (rate limit)
+            // Максимальное изменение за тик — 80% от MAX_YAW_RT для плавности
+            float maxDelta = Config.MAX_YAW_RT * 0.8f;
+            out[0] = Mth.clamp(smoothedDyaw, -maxDelta, maxDelta);
+            out[1] = Mth.clamp(smoothedDpitch, -maxDelta, maxDelta);
         }
 
         // deadzone «луч внутри хитбокса»: гасим коррекцию только когда луч взгляда
@@ -190,19 +277,37 @@ public final class BotController {
         // KNN-окно) он вызывает уход тангажа в насыщение («смотрит вверх»). Тангаж и так
         // отрабатывался без gain в прошлой версии.
         out[0] = out[0] * AIM_GAIN;
-        // Сеть (или retrieval) лишь СТАВИТ ЦЕЛЬ (tgtYaw/tgtPitch); сам плавный доворот
-        // между кадрами делает smoothAimFrame() (Mth.rotLerp) — без дёрганья. ---
-        tgtYaw = (float) Mth.wrapDegrees(self.getYRot() + Mth.clamp(out[0], -Config.MAX_YAW_RT, Config.MAX_YAW_RT));
-        // анти-клинч: гасим систематический drift взгляда в rail (±80°). Если выход
-        // сети/retrieval толкает pitch ЕЩЁ дальше в ту же сторону, что и текущий
-        // угол — это bias данных, а не цель; не даём заклинить взгляд в потолок/пол.
-        float pd = Mth.clamp(out[1], -Config.MAX_YAW_RT, Config.MAX_YAW_RT);
-        float pitchNow = self.getXRot();
-        if (Math.abs(pitchNow) > 80.0f && Math.signum(pd) == Math.signum(pitchNow)) {
-            pd = 0f;
+        
+        // В @silent режиме: обновляем серверный yaw/pitch, но НЕ трогаем локальный self.getYRot/XRot
+        // Это позволяет камере оставаться неподвижной для зрителя/записи, но сервер получает пакеты с поворотами
+        if (silentMode) {
+            // Обновить серверные углы (для отправки пакетов)
+            serverYaw = (float) Mth.wrapDegrees(serverYaw + Mth.clamp(out[0], -Config.MAX_YAW_RT, Config.MAX_YAW_RT));
+            float pd = Mth.clamp(out[1], -Config.MAX_YAW_RT, Config.MAX_YAW_RT);
+            if (Math.abs(serverPitch) > 80.0f && Math.signum(pd) == Math.signum(serverPitch)) {
+                pd = 0f;
+            }
+            serverPitch = (float) Mth.clamp(serverPitch + pd, -90.0F, 90.0F);
+            
+            // Цели для интерполяции остаются серверными (но локальная камера не будет двигаться)
+            tgtYaw = serverYaw;
+            tgtPitch = serverPitch;
+            aimTarget = false; // отключаем smoothAimFrame — локальная камера не движется
+        } else {
+            // Обычный режим: сеть (или retrieval) лишь СТАВИТ ЦЕЛЬ (tgtYaw/tgtPitch); 
+            // сам плавный доворот между кадрами делает smoothAimFrame() (Mth.rotLerp) — без дёрганья.
+            tgtYaw = (float) Mth.wrapDegrees(self.getYRot() + Mth.clamp(out[0], -Config.MAX_YAW_RT, Config.MAX_YAW_RT));
+            // анти-клинч: гасим систематический drift взгляда в rail (±80°). Если выход
+            // сети/retrieval толкает pitch ЕЩЁ дальше в ту же сторону, что и текущий
+            // угол — это bias данных, а не цель; не даём заклинить взгляд в потолок/пол.
+            float pd = Mth.clamp(out[1], -Config.MAX_YAW_RT, Config.MAX_YAW_RT);
+            float pitchNow = self.getXRot();
+            if (Math.abs(pitchNow) > 80.0f && Math.signum(pd) == Math.signum(pitchNow)) {
+                pd = 0f;
+            }
+            tgtPitch = (float) Mth.clamp(pitchNow + pd, -90.0F, 90.0F);
+            aimTarget = true;
         }
-        tgtPitch = (float) Mth.clamp(pitchNow + pd, -90.0F, 90.0F);
-        aimTarget = true;
 
         double dist = Math.sqrt(self.distanceToSqr(opp));
 

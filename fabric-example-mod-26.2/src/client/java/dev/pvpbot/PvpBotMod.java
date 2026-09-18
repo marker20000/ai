@@ -32,6 +32,14 @@ public final class PvpBotMod implements ClientModInitializer {
         ClientSendMessageEvents.ALLOW_CHAT.register((message) -> {
             String m = message.trim();
             Minecraft client = Minecraft.getInstance();
+            if (m.toLowerCase().startsWith("@silent")) {
+                String sub = m.substring(7).trim().toLowerCase();
+                if (sub.equals("on")) BOT.setSilentMode(true);
+                else if (sub.equals("off")) BOT.setSilentMode(false);
+                else BOT.setSilentMode(!BOT.isSilentMode());
+                client.player.sendSystemMessage(Component.literal("Silent mode: " + (BOT.isSilentMode() ? "ВКЛ (камера неподвижна, сервер получает повороты)" : "ВЫКЛ (обычный режим)")));
+                return false;
+            }
             if (m.toLowerCase().startsWith("@rec")) {
                 String sub = m.substring(4).trim().toLowerCase();
                 if (sub.equals("on")) BOT.setRecAim(true, client);
@@ -64,7 +72,7 @@ public final class PvpBotMod implements ClientModInitializer {
             }
             if (m.equalsIgnoreCase("@bot on")) {
                 BOT.setEnabled(true, client);
-                client.player.sendSystemMessage(Component.literal("Бот: ВКЛ" + (BOT.isModelLoaded() ? " · модель загружена" : " · МОДЕЛЬ НЕ ЗАГРУЖЕНА!")));
+                client.player.sendSystemMessage(Component.literal("Бот: ВКЛ" + (BOT.isModelLoaded() ? " · модель загружена" : " · МОДЕЛЬ НЕ ЗАГРУЖЕНА!") + " · lead=" + BOT.getLeadTicks() + " ticks"));
                 return false;
             }
             if (m.equalsIgnoreCase("@bot off")) {
@@ -72,9 +80,20 @@ public final class PvpBotMod implements ClientModInitializer {
                 client.player.sendSystemMessage(Component.literal("Бот: ВЫКЛ"));
                 return false;
             }
+            if (m.toLowerCase().startsWith("@bot ")) {
+                String arg = m.substring(5).trim();
+                try {
+                    int ticks = Integer.parseInt(arg);
+                    BOT.setLeadTicks(ticks);
+                    client.player.sendSystemMessage(Component.literal("Lead compensation: " + BOT.getLeadTicks() + " ticks (предсказание на " + (BOT.getLeadTicks() * 50) + "ms вперёд)"));
+                } catch (NumberFormatException e) {
+                    client.player.sendSystemMessage(Component.literal("Использование: @bot <число> (0-10 тиков)"));
+                }
+                return false;
+            }
             if (m.equalsIgnoreCase("@bot")) {
                 BOT.setEnabled(!BOT.isEnabled(), client);
-                client.player.sendSystemMessage(Component.literal("Бот: " + (BOT.isEnabled() ? "ВКЛ" : "ВЫКЛ") + (BOT.isModelLoaded() ? " · модель загружена" : " · МОДЕЛЬ НЕ ЗАГРУЖЕНА!")));
+                client.player.sendSystemMessage(Component.literal("Бот: " + (BOT.isEnabled() ? "ВКЛ" : "ВЫКЛ") + (BOT.isModelLoaded() ? " · модель загружена" : " · МОДЕЛЬ НЕ ЗАГРУЖЕНА!") + " · lead=" + BOT.getLeadTicks() + " ticks"));
                 return false;
             }
             return true;

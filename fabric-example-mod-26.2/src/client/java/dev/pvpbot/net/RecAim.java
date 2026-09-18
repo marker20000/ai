@@ -37,11 +37,14 @@ public final class RecAim {
     private static final int K = 5; // число соседей
 
     // Только признаки, реально связанные с наводкой (индексы в FEATURE_DIM=30).
-    private static final int[] FEAT_SEL = {6, 7, 8, 27, 28, 29}; // dist, yaw_diff, pitch_diff, tar_fwd, tar_side, aim_center
+    // Добавлены tarVelX/Y/Z (3,4,5) для tracking движущихся целей — KNN будет искать
+    // соседей с похожей скоростью цели, а не только с похожей ошибкой прицела.
+    private static final int[] FEAT_SEL = {6, 7, 8, 3, 4, 5, 27, 28, 29}; // dist, yaw_diff, pitch_diff, tarVelX, tarVelY, tarVelZ, tar_fwd, tar_side, aim_center
     // Веса расстояния по aim-признакам: доминируют ошибка прицеливания
     // (yaw_diff, pitch_diff) и aim_center — сосед выбирается по ПОХОЖЕЙ ОШИБКЕ
-    // ПРИЦЕЛА, а не по случайным признакам состояния. Совпадает с FEAT_W в aim_knn.py.
-    private static final float[] AIM_W = {0.5f, 4.0f, 4.0f, 1.0f, 1.0f, 2.0f}; // dist, yaw_diff, pitch_diff, tar_fwd, tar_side, aim_center
+    // ПРИЦЕЛА, а не по случайным признакам состояния. Velocity цели важна для tracking.
+    // Совпадает с FEAT_W в aim_knn.py.
+    private static final float[] AIM_W = {0.5f, 4.0f, 4.0f, 1.5f, 1.5f, 1.5f, 1.0f, 1.0f, 2.0f}; // dist, yaw_diff, pitch_diff, tarVelX, tarVelY, tarVelZ, tar_fwd, tar_side, aim_center
     // Проекция 480-мерного окна (WINDOW*FEATURE_DIM) -> 96-мерный aim-вектор.
     private static final int[] COLS;
     static {
@@ -211,7 +214,8 @@ public final class RecAim {
     }
 
     /** Возвращает [dyaw, dpitch] — взвешенное по расстоянию среднее k ближайших.
-     *  window — полное 480-мерное окно; проецируется на aim-признаки. */
+     *  window — полное 480-мерное окно; проецируется на aim-признаки.
+     *  Velocity-aware: при быстром движении цели увеличивает вес агрессивных действий. */
     public float[] aim(float[] window) {
         float[] pw = new float[D];
         for (int k = 0; k < D; k++) pw[k] = window[COLS[k]];
@@ -238,27 +242,47 @@ public final class RecAim {
         }
         // сохраняем K соседей для диагностики (до OOD-ветки, чтобы были доступны в обоих случаях)
         for (int k = 0; k < K; k++) { lastNbI[k] = bestI[k]; lastNbD[k] = bestD[k]; }
+        
+        // Вычислить скорость цели из последнего кадра окна для velocity-aware weighting
+        int lastFrame = (Config.WINDOW - 1) * Config.FEATURE_DIM;
+        float tarVelX = window[lastFrame + 3] * Config.MAX_SPEED;  // f[3] = tarVelX/MAX_SPEED
+        float tarVelY = window[lastFrame + 4] * Config.MAX_SPEED;  // f[4] = tarVelY/MAX_SPEED
+        float tarVelZ = window[lastFrame + 5] * Config.MAX_SPEED;  // f[5] = tarVelZ/MAX_SPEED
+        float tarSpeed = (float) Math.sqrt(tarVelX * tarVelX + tarVelZ * tarVelZ); // горизонтальная скорость
+        
         // OOD: ближайший сосед слишком далеко — retrieval недостоверен. Вместо
         // {0,0} (это клинит взгляд: состояние не меняется → снова OOD → вечно
         // {0,0}) возвращаем пропорциональную коррекцию по СОБСТВЕННОЙ ошибке
         // прицеливания из окна (признаки 7/8 = yawDiff/pitchDiff). Это
         // recovery-контроллер: направление даёт само состояние, не скрипт.
+        // При высокой скорости цели увеличиваем агрессивность OOD fallback.
         if (bestD[0] > oodThreshold) {
             lastOod = true;
             lastDist = (float) Math.sqrt(bestD[0]);
-            int last = (Config.WINDOW - 1) * Config.FEATURE_DIM;
-            float yawDiffDeg = window[last + 7] * 180f;   // f[7] = yawDiff/180
-            float pitchDiffDeg = window[last + 8] * 90f;  // f[8] = pitchDiff/90
-            float k = 0.25f;
+            float yawDiffDeg = window[lastFrame + 7] * 180f;   // f[7] = yawDiff/180
+            float pitchDiffDeg = window[lastFrame + 8] * 90f;  // f[8] = pitchDiff/90
+            float k = 0.25f + Math.min(0.2f, tarSpeed * 0.5f); // 0.25-0.45 в зависимости от скорости
             return new float[]{
                 Mth.clamp(yawDiffDeg * k, -Config.MAX_YAW_RT, Config.MAX_YAW_RT),
                 Mth.clamp(pitchDiffDeg * k, -Config.MAX_YAW_RT, Config.MAX_YAW_RT)
             };
         }
+        
+        // Velocity-aware weighting: при быстром движении цели (>0.3 блока/тик)
+        // увеличиваем вес соседей с более агрессивными действиями (большие dyaw/dpitch).
+        // Это помогает tracking: вместо усреднения всех top-5 мы предпочитаем быстрые реакции.
         float dyaw = 0f, dpitch = 0f, wsum = 0f;
+        boolean fastTarget = tarSpeed > 0.3f;
         for (int k = 0; k < K; k++) {
             if (bestI[k] < 0) continue;
             float wgt = (float) (1.0 / (Math.sqrt(bestD[k]) + 1e-3));
+            
+            if (fastTarget) {
+                // При быстрой цели: boost соседей с агрессивными действиями
+                float actionMag = Math.abs(Y[bestI[k]][0]) + Math.abs(Y[bestI[k]][1]);
+                wgt *= (1.0f + actionMag * 0.4f); // до ~2x для больших коррекций
+            }
+            
             dyaw += wgt * Y[bestI[k]][0];
             dpitch += wgt * Y[bestI[k]][1];
             wsum += wgt;
